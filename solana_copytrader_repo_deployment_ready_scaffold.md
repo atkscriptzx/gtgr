@@ -179,7 +179,7 @@ PGP_BACKUP_ENABLED=true
 
 ---
 
-## Docker & Make
+## Docker, Make, Req, pypro
 
 ```yaml
 # docker-compose.yml
@@ -217,7 +217,35 @@ test:
 	pytest -q || true
 ```
 
----
+```requirements.txt
+python-dotenv==1.0.1
+pydantic==2.8.2
+loguru==0.7.2
+requests==2.32.3
+python-telegram-bot==21.4
+pyyaml==6.0.2
+croniter==3.0.3
+```
+
+```pyproject.toml
+[project]
+name = "solana-copytrader"
+version = "0.1.0"
+description = "Fully automated stealth Solana copy-trading bot"
+requires-python = ">=3.11"
+dependencies = [
+    "python-dotenv==1.0.1",
+    "pydantic==2.8.2",
+    "loguru==0.7.2",
+    "requests==2.32.3",
+    "python-telegram-bot==21.4",
+    "pyyaml==6.0.2",
+    "croniter==3.0.3"
+]
+
+[tool.ruff]
+line-length = 100
+```
 
 ## Scripts
 
@@ -240,6 +268,138 @@ cmds=[
 print('Commands preview:', cmds)
 if not TOKEN: print('No TELEGRAM_BOT_TOKEN set; skipping API call.')
 PY
+```
+
+```bash
+#scripts/daily_5am_trigger.sh
+#!/bin/bash
+set -e
+
+PROJECT_DIR="$(dirname "$(dirname "$(realpath "$0")")")"
+cd "$PROJECT_DIR"
+source .venv/bin/activate
+
+# 1) Drain burners & funders → collector at 04:45
+python -m src.flows.burner_flow --force-drain
+python -m src.flows.funder_rotation --force-drain
+
+# 2) Collector → DEX + proxies (at 04:50)
+python -m src.flows.collector_flow
+
+# 3) Rotate funders & regenerate wallets (at 05:00)
+python -m src.flows.funder_rotation --rotate
+```
+
+
+```bash
+#scripts/rotate_now.sh
+#!/bin/bash
+set -e
+
+PROJECT_DIR="$(dirname "$(dirname "$(realpath "$0")")")"
+cd "$PROJECT_DIR"
+source .venv/bin/activate
+
+python -m src.flows.funder_rotation --rotate
+```
+
+```bash
+#scripts/self_heal.sh
+#!/bin/bash
+set -e
+
+BOT_NAME="copytrader"
+if ! pgrep -f "$BOT_NAME" > /dev/null; then
+    echo "[SELF-HEAL] Bot not running — restarting..."
+    systemctl --user restart copytrader.service
+fi
+```
+
+```bash
+#scripts/gpg_sign_logs.sh
+#!/bin/bash
+set -e
+
+LOG_DIR="logs"
+SIGNING_KEY="your-gpg-key-id"
+
+for file in "$LOG_DIR"/*.log; do
+    [ -e "$file" ] || continue
+    gpg --yes --local-user "$SIGNING_KEY" --output "$file.sig" --detach-sign "$file"
+done
+```
+
+```bash
+#scripts/pgp_encrypt_keys.sh
+#!/bin/bash
+set -e
+
+KEY_DIR="keys"
+BACKUP_DIR="backups"
+RECIPIENT="your-pgp-key-id"
+
+mkdir -p "$BACKUP_DIR"
+for file in "$KEY_DIR"/*.json; do
+    [ -e "$file" ] || continue
+    gpg --yes --encrypt --recipient "$RECIPIENT" --output "$BACKUP_DIR/$(basename "$file").gpg" "$file"
+done
+```
+
+```bash
+#src/utils/check_rpc_latency.py
+import requests, time, subprocess, os
+
+RPC_POOL_FILE = os.getenv("RPC_POOL_FILE", "config/rpc_pool.txt")
+LATENCY_LIMIT_MS = 500
+
+def check_latency(url):
+    start = time.time()
+    try:
+        requests.post(url, json={"jsonrpc":"2.0","id":1,"method":"getHealth"}, timeout=2)
+        return (time.time() - start) * 1000
+    except Exception:
+        return float("inf")
+
+def main():
+    with open(RPC_POOL_FILE) as f:
+        rpcs = [line.strip() for line in f if line.strip()]
+    bad = []
+    for rpc in rpcs:
+        latency = check_latency(rpc)
+        print(f"{rpc} latency: {latency:.2f} ms")
+        if latency > LATENCY_LIMIT_MS:
+            bad.append(rpc)
+    if len(bad) == len(rpcs):
+        print("[!] All RPCs slow — rotating...")
+        subprocess.run(["python", "src/utils/reset_rpc.py"])
+
+if __name__ == "__main__":
+    main()
+```
+
+```bash
+#src/utils/reset_rpc.py
+import random, os, json
+
+RPC_POOL_FILE = os.getenv("RPC_POOL_FILE", "config/rpc_pool.txt")
+STATE_FILE = "data/state.json"
+
+def main():
+    with open(RPC_POOL_FILE) as f:
+        rpcs = [line.strip() for line in f if line.strip()]
+    new_rpc = random.choice(rpcs)
+    print(f"[RPC RESET] Switching to {new_rpc}")
+
+    state = {}
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE) as f:
+            state = json.load(f)
+    state["active_rpc"] = new_rpc
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
+
+if __name__ == "__main__":
+    main()
 ```
 
 ```bash
@@ -279,15 +439,9 @@ print("State now:")
 print(State().load())
 ```
 
-```bash
-# Other scripts
-# daily_5am_trigger.sh, rotate_now.sh, self_heal.sh, gpg_sign_logs.sh, pgp_encrypt_keys.sh,
-# check_rpc_latency.py, reset_rpc.py (as previously provided)
-```
-
 ---
 
-## Config & Deploy
+## Config, Deploy & Data
 
 ```yaml
 # config/config.schema.yaml
@@ -315,6 +469,60 @@ proxy:
   hops: 2
   delay_s_min: 3
   delay_s_max: 9
+
+```
+
+```yaml
+#config/rpc_pool.txt
+# Primary (paid) RPCs — best reliability/throughput
+https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY
+https://solana-mainnet.g.alchemy.com/v2/YOUR_ALCHEMY_KEY
+https://solana-mainnet.core.chainstack.com/YOUR_KEY
+https://bold-absolute-someid.solana-mainnet.quiknode.pro/YOUR_KEY/
+
+# Secondary (community/public) — rate limited, use as last resort
+https://api.mainnet-beta.solana.com
+https://solana-api.projectserum.com
+https://rpc.ankr.com/solana
+
+```
+
+```yaml
+#config/telegram_commands.md
+/status        → Show live balances for burner, funders, collector; active RPC
+/rotate_now    → Promote NEXT→ACTIVE, STANDBY→NEXT, create new STANDBY
+/sync          → Health check (RPC latency, cron timers, service status)
+/kill          → Trigger kill switch (drain→DEX→burn & regen) [use with caution]
+/vault_status  → Show Hot/Cold wallet totals (BTC/ETH/XRP)
+/atpnl         → All-time PnL (USD), plus today’s change
+
+```
+
+```yaml
+#config/tor/torrc.example
+# Tor data directory (must be writable by tor user)
+DataDirectory /var/lib/tor
+
+# Minimize DNS leaks / reduce logging
+Log notice stdout
+SocksPort 9050
+AvoidDiskWrites 1
+ClientOnly 1
+
+# === Hidden Service: SSH over Tor (.onion:22 → localhost:22) ===
+HiddenServiceDir /var/lib/tor/copytrader_ssh/
+HiddenServicePort 22 127.0.0.1:22
+
+# === Hidden Service: optional local dashboard (if you add one) ===
+#HiddenServiceDir /var/lib/tor/copytrader_ui/
+#HiddenServicePort 8080 127.0.0.1:8080
+
+# Performance/compat tweaks
+NumCPUs 2
+CircuitBuildTimeout 10
+LearnCircuitBuildTimeout 0
+KeepalivePeriod 60
+
 ```
 
 ```ini
@@ -352,6 +560,74 @@ Description=Healthcheck for CopyTrader
 Type=oneshot
 WorkingDirectory=%h/solana-copytrader
 ExecStart=%h/solana-copytrader/.venv/bin/python scripts/check_rpc_latency.py
+```
+
+```ini
+#deploy/copytrader.timer
+[Unit]
+Description=Run Solana Copytrader Bot at startup and keep alive
+
+[Timer]
+# Start immediately at boot
+OnBootSec=30s
+# Run every 1 minute to check health or restart if dead
+OnUnitActiveSec=60s
+Unit=copytrader.service
+
+[Install]
+WantedBy=timers.target
+```
+
+```ini
+#deploy/copytrader.service
+[Unit]
+Description=Solana Copytrader Bot
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/solana-copytrader
+ExecStart=/home/ubuntu/solana-copytrader/.venv/bin/python -m src.main
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+
+```
+
+```json
+# data/state.json
+{
+  "active_rpc": "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
+  "wallets": {
+    "burner": {
+      "pubkey": "BURNER_PUBLIC_KEY",
+      "keyfile": "keys/burner.json"
+    },
+    "collector": {
+      "pubkey": "COLLECTOR_PUBLIC_KEY",
+      "keyfile": "keys/collector.json"
+    },
+    "funder_active": {
+      "pubkey": "FUNDER_ACTIVE_PUBLIC_KEY",
+      "keyfile": "keys/funder_active.json"
+    },
+    "funder_next": {
+      "pubkey": "FUNDER_NEXT_PUBLIC_KEY",
+      "keyfile": "keys/funder_next.json"
+    },
+    "funder_standby": {
+      "pubkey": "FUNDER_STANDBY_PUBLIC_KEY",
+      "keyfile": "keys/funder_standby.json"
+    }
+  },
+  "last_rotation": "2025-08-09T05:00:00Z",
+  "last_kill_switch": null
+}
+
 ```
 
 ---
@@ -422,6 +698,79 @@ logger.add(Path(CFG.log_dir, 'copytrader.log'), rotation='10 MB', retention='14 
 ```
 
 ```python
+# src/core/telemetry.py
+# src/core/telemetry.py
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional, Callable
+from time import perf_counter
+from loguru import logger
+
+
+@dataclass
+class Telemetry:
+    """
+    Minimal telemetry sink:
+    - event(name, **fields): structured log line
+    - timeit(name): decorator to record duration_ms and success flag
+    - gauge/counter: simple numeric metrics emitted as logs (works with log shippers)
+    """
+    default_ctx: Dict[str, Any] = field(default_factory=dict)
+
+    def with_context(self, **ctx) -> "Telemetry":
+        merged = {**self.default_ctx, **ctx}
+        return Telemetry(default_ctx=merged)
+
+    # --- core emitters -----------------------------------------------------
+
+    def event(self, name: str, **fields: Any) -> None:
+        payload = {**self.default_ctx, **fields}
+        logger.info(f"[telemetry] {name} | {payload}")
+
+    def warn(self, name: str, **fields: Any) -> None:
+        payload = {**self.default_ctx, **fields}
+        logger.warning(f"[telemetry] {name} | {payload}")
+
+    def error(self, name: str, **fields: Any) -> None:
+        payload = {**self.default_ctx, **fields}
+        logger.error(f"[telemetry] {name} | {payload}")
+
+    # --- metrics-style helpers --------------------------------------------
+
+    def counter(self, name: str, inc: float = 1.0, **fields: Any) -> None:
+        payload = {**self.default_ctx, **fields, "value": inc}
+        logger.info(f"[metric.counter] {name} | {payload}")
+
+    def gauge(self, name: str, value: float, **fields: Any) -> None:
+        payload = {**self.default_ctx, **fields, "value": value}
+        logger.info(f"[metric.gauge] {name} | {payload}")
+
+    # --- decorators --------------------------------------------------------
+
+    def timeit(self, name: str) -> Callable:
+        """
+        Decorator that measures duration and emits success/failure.
+        Usage:
+            t = Telemetry().with_context(flow="collector")
+            @t.timeit("dex.swap")
+            def do_swap(...): ...
+        """
+        def _wrap(fn: Callable) -> Callable:
+            def _inner(*args, **kwargs):
+                start = perf_counter()
+                try:
+                    result = fn(*args, **kwargs)
+                    self.event(name, duration_ms=round((perf_counter() - start) * 1000, 2), ok=True)
+                    return result
+                except Exception as e:
+                    self.error(name, duration_ms=round((perf_counter() - start) * 1000, 2), ok=False, err=str(e))
+                    raise
+            return _inner
+        return _wrap
+
+```
+
+```python
 # src/core/timeutils.py
 import time, random
 
@@ -486,6 +835,121 @@ class State:
 
     def get_pubkey(self, role: str) -> str | None:
         return self._cache.get("wallets", {}).get(role, {}).get("pubkey")
+```
+
+```python
+#src/core/utils.py
+# src/core/utils.py
+from __future__ import annotations
+import json
+import os
+import random
+import time
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterable, Iterator, List, TypeVar, Callable, Any
+
+T = TypeVar("T")
+
+
+# --- collection helpers -----------------------------------------------------
+
+def chunked(items: List[T] | Iterable[T], size: int) -> Iterator[List[T]]:
+    """Yield lists of length `size` from an iterable."""
+    if size <= 0:
+        raise ValueError("size must be > 0")
+    buf: List[T] = []
+    for x in items:
+        buf.append(x)
+        if len(buf) >= size:
+            yield buf
+            buf = []
+    if buf:
+        yield buf
+
+
+# --- time helpers -----------------------------------------------------------
+
+def now_utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+def sleep_jitter(min_s: int, max_s: int) -> None:
+    time.sleep(random.randint(min_s, max_s))
+
+
+# --- env helpers ------------------------------------------------------------
+
+def env_bool(name: str, default: bool = False) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return v.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+# --- JSON I/O (safe) --------------------------------------------------------
+
+def load_json_safe(path: Path | str, default: Any = None) -> Any:
+    p = Path(path)
+    if not p.exists():
+        return default
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return default
+
+def save_json_atomic(path: Path | str, data: Any) -> None:
+    """Write JSON atomically to avoid corruption on crashes."""
+    p = Path(path)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    tmp.replace(p)
+
+
+# --- retry/backoff ----------------------------------------------------------
+
+def retry(
+    attempts: int = 3,
+    base_delay: float = 0.5,
+    max_delay: float = 5.0,
+    jitter: float = 0.25,
+    on: tuple[type[BaseException], ...] = (Exception,),
+):
+    """
+    Decorator for simple exponential backoff with jitter.
+    Usage:
+        @retry(attempts=5)
+        def rpc_call(...): ...
+    """
+    def _wrap(fn: Callable):
+        def _inner(*args, **kwargs):
+            delay = base_delay
+            last_exc = None
+            for i in range(1, attempts + 1):
+                try:
+                    return fn(*args, **kwargs)
+                except on as e:
+                    last_exc = e
+                    if i == attempts:
+                        raise
+                    sleep = min(max_delay, delay * (2 ** (i - 1)))
+                    # add +/- jitter%
+                    jitter_amt = sleep * jitter
+                    time.sleep(max(0.01, random.uniform(sleep - jitter_amt, sleep + jitter_amt)))
+            # Should not reach; re-raise to satisfy type checkers
+            raise last_exc  # type: ignore[misc]
+        return _inner
+    return _wrap
+
+
+# --- human formatting --------------------------------------------------------
+
+def human_sol(x: float) -> str:
+    return f"{x:,.4f} SOL"
+
+def human_usd(x: float) -> str:
+    return f"${x:,.2f}"
+
 ```
 
 ---
@@ -947,7 +1411,7 @@ if __name__ == '__main__':
 
 ---
 
-## Main Entrypoint
+## Main Entrypoint/src
 
 ```python
 # src/main.py
