@@ -204,14 +204,14 @@ cd "$PROJECT_DIR"
 source .venv/bin/activate
 
 # 1) Drain burners & funders → collector at 04:45
-python -m src/flow/burner_flow --force-drain
-python -m src/flow/funder_rotation --force-drain
+python -m src/flow/burner.py --force-drain
+python -m src/flow/funders.py --force-drain
 
 # 2) Collector → DEX + proxies (at 04:50)
-python -m src/flow/collector_flow
+python -m src/flow/collector.py
 
 # 3) Rotate funders & regenerate wallets (at 05:00)
-python -m src/flow/funder_rotation --rotate
+python -m src/flow/rotation.py --rotate
 ```
 
 
@@ -224,7 +224,7 @@ PROJECT_DIR="$(dirname "$(dirname "$(realpath "$0")")")"
 cd "$PROJECT_DIR"
 source .venv/bin/activate
 
-python -m src/flows/funder_rotation --rotate
+python -m src/flow/rotation.py --rotate
 ```
 
 ```bash
@@ -498,7 +498,7 @@ Description=Healthcheck for CopyTrader
 Type=oneshot
 User=ubuntu
 WorkingDirectory=/home/ubuntu/solana-copytrader
-ExecStart=/home/ubuntu/solana-copytrader/.venv/bin/python /home/ubuntu/solana-copytrader/scripts/check_rpc_latency.py
+ExecStart=/home/ubuntu/solana-copytrader/.venv/bin/python /home/ubuntu/solana-copytrader/src/utils/check_rpc_latency.py
 
 ```
 
