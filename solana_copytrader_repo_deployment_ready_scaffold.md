@@ -31,7 +31,7 @@ kill switch, Telegram control, Tor, GPG/PGP, cron/systemd, dry-run mode,
 
 ---
 
-## .env.example
+## .env
 
 ```dotenv
 ENV=prod
@@ -132,7 +132,8 @@ test:
 	pytest -q || true
 ```
 
-```requirements.txt
+```txt
+#requirements.txt
 python-dotenv==1.0.1
 pydantic==2.8.2
 loguru==0.7.2
@@ -140,9 +141,13 @@ requests==2.32.3
 python-telegram-bot==21.4
 pyyaml==6.0.2
 croniter==3.0.3
+solana>=0.30.2
+solders>=0.20.0
+base58>=2.1.1
 ```
 
-```pyproject.toml
+```toml
+#pyproject.toml
 [project]
 name = "solana-copytrader"
 version = "0.1.0"
@@ -195,14 +200,14 @@ cd "$PROJECT_DIR"
 source .venv/bin/activate
 
 # 1) Drain burners & funders → collector at 04:45
-python -m src.flows.burner_flow --force-drain
-python -m src.flows.funder_rotation --force-drain
+python -m src/flows/burner_flow --force-drain
+python -m src/flows/funder_rotation --force-drain
 
 # 2) Collector → DEX + proxies (at 04:50)
-python -m src.flows.collector_flow
+python -m src/flows/collector_flow
 
 # 3) Rotate funders & regenerate wallets (at 05:00)
-python -m src.flows.funder_rotation --rotate
+python -m src/flows/funder_rotation --rotate
 ```
 
 
@@ -215,7 +220,7 @@ PROJECT_DIR="$(dirname "$(dirname "$(realpath "$0")")")"
 cd "$PROJECT_DIR"
 source .venv/bin/activate
 
-python -m src.flows.funder_rotation --rotate
+python -m src/flows/funder_rotation --rotate
 ```
 
 ```bash
@@ -328,15 +333,23 @@ set -euo pipefail
 ```
 
 ```bash
-# scripts/systemd_install.sh
 #!/usr/bin/env bash
 set -euo pipefail
-UNIT_DIR="$HOME/.config/systemd/user"
-mkdir -p "$UNIT_DIR"
-cp deploy/*.service deploy/*.timer "$UNIT_DIR"/
-systemctl --user daemon-reload
-systemctl --user enable copytrader.service copytrader-health.timer
-systemctl --user start copytrader-health.timer
+
+# Installs system-wide (root) units so the bot starts at boot without user login.
+# Adjust paths if your repo directory/user differs.
+
+sudo cp deploy/copytrader.service /etc/systemd/system/
+sudo cp deploy/copytrader.timer /etc/systemd/system/
+sudo cp deploy/copytrader-health.service /etc/systemd/system/
+sudo cp deploy/copytrader-health.timer /etc/systemd/system/
+
+sudo systemctl daemon-reload
+sudo systemctl enable copytrader.service copytrader.timer copytrader-health.timer
+sudo systemctl start  copytrader.timer  copytrader-health.timer
+
+echo "✓ Installed system services. Use: sudo systemctl status copytrader.service"
+
 ```
 
 ```bash
@@ -441,18 +454,22 @@ KeepalivePeriod 60
 ```
 
 ```ini
-# deploy/copytrader.service
+#deploy/copytrader.service
 [Unit]
-Description=Solana CopyTrader Bot
-After=network-online.target
+Description=Solana Copytrader Bot
+After=network.target
+
 [Service]
 Type=simple
-WorkingDirectory=%h/solana-copytrader
-ExecStart=%h/solana-copytrader/.venv/bin/python -m src.main
+User=ubuntu
+WorkingDirectory=/home/ubuntu/solana-copytrader
+ExecStart=/home/ubuntu/solana-copytrader/.venv/bin/python -m src.main
 Restart=always
+RestartSec=10
 Environment=PYTHONUNBUFFERED=1
+
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
 ```
 
 ```ini
@@ -491,25 +508,6 @@ Unit=copytrader.service
 
 [Install]
 WantedBy=timers.target
-```
-
-```ini
-#deploy/copytrader.service
-[Unit]
-Description=Solana Copytrader Bot
-After=network.target
-
-[Service]
-Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/solana-copytrader
-ExecStart=/home/ubuntu/solana-copytrader/.venv/bin/python -m src.main
-Restart=always
-RestartSec=10
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=multi-user.target
 
 ```
 
@@ -883,27 +881,84 @@ class Wallet:
 
 ```python
 # src/solana/client.py
+from __future__ import annotations
 from dataclasses import dataclass
 from loguru import logger
+
+from solana.rpc.api import Client
+from solana.rpc.types import TxOpts
+from solana.transaction import Transaction
+from solana.system_program import TransferParams, transfer
+
+from src.solana.keypair_io import load_keypair_from_file
+from src.core.config import CFG
+from src.core.state import State
+
+LAMPORTS_PER_SOL = 1_000_000_000
 
 @dataclass
 class TxResult:
     sig: str
 
 class SolanaClient:
-    def __init__(self, rpc_url:str):
-        self.rpc_url = rpc_url
+    """
+    Real RPC client using solana-py. Reads the active RPC from state.json if present,
+    otherwise falls back to CFG.rpc_primary.
+    """
+    def __init__(self, rpc_url: str | None = None):
+        state = State().load()
+        active_rpc = state.get("active_rpc")
+        self.rpc_url = rpc_url or active_rpc or CFG.rpc_primary
+        self.client = Client(self.rpc_url)
+        logger.info(f"[SolanaClient] RPC={self.rpc_url}")
 
-    def get_balance(self, wallet_keyfile:str) -> float:
-        # TODO: implement real RPC call using keyfile pubkey
-        return 0.0
+    def get_balance(self, wallet_keyfile: str) -> float:
+        kp = load_keypair_from_file(wallet_keyfile)
+        resp = self.client.get_balance(kp.pubkey())
+        if resp.is_err():
+            raise RuntimeError(f"get_balance RPC error: {resp}")
+        lamports = resp.value  # returns int lamports
+        sol = lamports / LAMPORTS_PER_SOL
+        logger.debug(f"[balance] {kp.pubkey()} = {sol:.9f} SOL")
+        return sol
 
-    def transfer(self, src_keyfile:str, dst_addr:str, amount_sol:float) -> TxResult:
-        logger.info(f"Transfer {amount_sol} SOL from {src_keyfile} to {dst_addr}")
-        return TxResult(sig='SIMULATED')
+    def transfer(self, src_keyfile: str, dst_addr: str, amount_sol: float) -> TxResult:
+        if amount_sol <= 0:
+            raise ValueError("amount_sol must be > 0")
 
-    def burn_wallet(self, key_path:str):
-        logger.warning(f"Burn wallet {key_path}")
+        kp = load_keypair_from_file(src_keyfile)
+        lamports = int(amount_sol * LAMPORTS_PER_SOL)
+
+        # Recent blockhash
+        bh = self.client.get_latest_blockhash()
+        if bh.is_err():
+            raise RuntimeError(f"get_latest_blockhash error: {bh}")
+        bhash = bh.value.blockhash
+
+        # Build tx
+        ix = transfer(TransferParams(from_pubkey=kp.pubkey(), to_pubkey=dst_addr, lamports=lamports))
+        tx = Transaction(recent_blockhash=bhash, fee_payer=kp.pubkey())
+        tx.add(ix)
+
+        # Send + confirm
+        sig = self.client.send_transaction(tx, kp, opts=TxOpts(skip_preflight=False, max_retries=3))
+        if sig.is_err():
+            raise RuntimeError(f"send_transaction error: {sig}")
+
+        signature = str(sig.value)
+        logger.info(f"[transfer] {amount_sol} SOL -> {dst_addr} sig={signature}")
+
+        # (optional) confirm
+        conf = self.client.confirm_transaction(signature)
+        if conf.is_err():
+            logger.warning(f"[transfer] confirm error: {conf}")
+
+        return TxResult(sig=signature)
+
+    def burn_wallet(self, key_path: str):
+        # purely a file delete (WalletManager handles actual burn).
+        logger.warning(f"Burn wallet called for {key_path} (file deletion handled elsewhere).")
+
 ```
 
 ```python
@@ -912,17 +967,26 @@ from __future__ import annotations
 from pathlib import Path
 from dataclasses import dataclass
 from loguru import logger
+
+from solders.keypair import Keypair  # NEW
+from base58 import b58encode          # NEW
+
 from .wallet import Wallet
 from src.core.state import State
 from src.core.keystore import KeyStore
 
-# Stub keypair generator — replace with real solana keygen in prod
+LAMPORTS_PER_SOL = 1_000_000_000
 
-def _stub_keypair() -> tuple[str, str]:
-    import secrets, json
-    pk = "Pub" + secrets.token_hex(16)
-    secret = {"type": "stub-keypair", "pubkey": pk, "secret": secrets.token_hex(32)}
-    return pk, json.dumps(secret)
+def _generate_keypair_json() -> tuple[str, str]:
+    """
+    Return (pubkey_str, json_text) where json_text is a 64-byte array like solana-keygen.
+    """
+    kp = Keypair()  # random
+    secret = kp.to_bytes()          # 64 bytes (private + public)
+    arr = list(secret)              # [int,int,...]
+    pub = str(kp.pubkey())          # base58
+    import json
+    return pub, json.dumps(arr)
 
 @dataclass
 class RolePaths:
@@ -945,8 +1009,8 @@ class WalletManager:
         return p
 
     def create_wallet(self, role: str, filename: str) -> Wallet:
-        pub, secret = _stub_keypair()
-        path = self._write_keyfile(filename, secret)
+        pub, secret_json = _generate_keypair_json()
+        path = self._write_keyfile(filename, secret_json)
         self.state.set_pubkey(role, pub)
         logger.info(f"[{role}] created {pub} at {path}")
         return Wallet(name=role, key_path=str(path), pubkey=pub)
@@ -961,6 +1025,24 @@ class WalletManager:
     def replace_wallet(self, role: str, filename: str) -> Wallet:
         self.burn_wallet(role, filename)
         return self.create_wallet(role, filename)
+
+```
+
+```python
+# src/solana/keypair_io.py
+from __future__ import annotations
+import json
+from pathlib import Path
+from solders.keypair import Keypair
+
+def load_keypair_from_file(path: str | Path) -> Keypair:
+    p = Path(path)
+    data = json.loads(p.read_text())
+    if not isinstance(data, list) or len(data) not in (64, 32):
+        raise ValueError(f"Unexpected key format in {p}")
+    # Both 64-byte secret (preferred) or 32-byte secret supported
+    b = bytes(data)
+    return Keypair.from_bytes(b) if len(b) == 64 else Keypair.from_seed(b)
 ```
 
 ---
@@ -1222,47 +1304,57 @@ class KillSwitch:
 # src/telegram/bot.py
 import os
 from loguru import logger
-from telegram.ext import ApplicationBuilder, CommandHandler
+from telegram.ext import Application, CommandHandler
 from . import commands as C
 
 class TGBot:
     def __init__(self):
-        self.token = os.getenv('TELEGRAM_BOT_TOKEN','')
-        self.app = ApplicationBuilder().token(self.token).build()
+        self.token = os.getenv('TELEGRAM_BOT_TOKEN', '')
+        if not self.token:
+            logger.error("TELEGRAM_BOT_TOKEN missing")
+        self.app = Application.builder().token(self.token).build()
         self.app.add_handler(CommandHandler('status', C.cmd_status))
         self.app.add_handler(CommandHandler('rotate_now', C.cmd_rotate_now))
         self.app.add_handler(CommandHandler('sync', C.cmd_sync))
         self.app.add_handler(CommandHandler('kill', C.cmd_kill))
         self.app.add_handler(CommandHandler('vault_status', C.cmd_vault_status))
         self.app.add_handler(CommandHandler('atpnl', C.cmd_atpnl))
-    async def run(self):
-        logger.info("Starting Telegram bot")
-        await self.app.initialize()
-        await self.app.start()
-        await self.app.updater.start_polling()
+
+    def run(self):
+        logger.info("Starting Telegram bot (run_polling)")
+        # Blocks the thread; handles init/start/idle internally
+        self.app.run_polling(close_loop=False)
+
 ```
 
 ```python
 # src/telegram/commands.py
 from loguru import logger
+from telegram import Update
+from telegram.ext import ContextTypes
 
-def cmd_status(update, ctx):
-    logger.info("/status"); update.message.reply_text("Balances: ... (stub)")
+async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    logger.info("/status")
+    await update.message.reply_text("Balances: ... (stub)")
 
-def cmd_rotate_now(update, ctx):
-    logger.info("/rotate_now"); update.message.reply_text("Manual rotation kicked off.")
+async def cmd_rotate_now(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    logger.info("/rotate_now")
+    await update.message.reply_text("Manual rotation kicked off.")
 
-def cmd_sync(update, ctx):
-    logger.info("/sync"); update.message.reply_text("Health OK.")
+async def cmd_sync(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    logger.info("/sync")
+    await update.message.reply_text("Health OK.")
 
-def cmd_kill(update, ctx):
-    logger.warning("/kill -> kill switch"); update.message.reply_text("Kill switch activated (simulated).")
+async def cmd_kill(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    logger.warning("/kill -> kill switch")
+    await update.message.reply_text("Kill switch activated (simulated).")
 
-def cmd_vault_status(update, ctx):
-    update.message.reply_text("Vault (Hot/Cold): ... (stub)")
+async def cmd_vault_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Vault (Hot/Cold): ... (stub)")
 
-def cmd_atpnl(update, ctx):
-    update.message.reply_text("All-time PnL: ... (stub)")
+async def cmd_atpnl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("All-time PnL: ... (stub)")
+
 ```
 
 ```python
@@ -1337,26 +1429,22 @@ from src.security.kill_switch import KillSwitch
 from src.solana.wallet_manager import WalletManager
 from src.core.state import State
 
-async def _noop():
-    pass
-
 def drain_all():
     logger.warning("Draining all active wallets to collector (stub)")
 
 def reboot_bot():
     logger.warning("Rebooting bot (stub)")
 
-async def main():
+def main():
     logger.info(f"Starting CopyTrader in {CFG.env} mode")
     state = State(); wm = WalletManager(state)
     ks = KillSwitch(drain_all, reboot_bot)
     ks.check_and_trigger()
-    bot = TGBot()
-    await bot.run()
+    TGBot().run()
 
 if __name__ == '__main__':
-    import asyncio
-    asyncio.run(main())
+    main()
+
 ```
 
 ---
