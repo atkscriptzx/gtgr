@@ -333,6 +333,7 @@ set -euo pipefail
 ```
 
 ```bash
+#systemd_install.sh
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -752,7 +753,6 @@ class State:
 
 ```python
 #src/core/utils.py
-# src/core/utils.py
 from __future__ import annotations
 import json
 import os
