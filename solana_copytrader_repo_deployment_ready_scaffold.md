@@ -1236,12 +1236,93 @@ class DailyRotation:
 
 ```python
 # src/trading/watcher.py
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Iterable, Optional
 from loguru import logger
+
+from src.core.config import CFG
+from src.trading.copier import Copier
+
+@dataclass
+class TradeSignal:
+    """
+    Minimal representation of a copy-trade signal from Cupesy/Euris.
+    You should fill in `raw_market_id` and/or `token_symbol` from your on-chain watcher.
+    """
+    source: str                 # "Cupesy" | "Euris"
+    raw_market_id: Optional[str]  # e.g., a pool address, pair, or market id
+    token_symbol: Optional[str]   # e.g., "XYZ"
+    token_mint: Optional[str]     # if you already resolved it, stick it here
+
+
 class WalletWatcher:
-    def __init__(self, addresses:list[str]):
-        self.addresses = addresses
+    def __init__(self, addresses: Iterable[str]):
+        self.addresses = list(addresses)
+        self.copier = Copier(trade_size_sol=CFG.trading.trade_size_sol)
+
+    # --- public -------------------------------------------------------------
+
     def poll(self):
+        """
+        Poll your tracked addresses (Cupesy, Euris) and emit TradeSignal events.
+        Replace the stub with your actual logic.
+        """
         logger.debug(f"Watching {len(self.addresses)} wallets")
+        # STUB: yield no signals by default
+        yield from ()
+
+    def handle_signals(self):
+        """
+        Main loop to process new signals and place first-time buys.
+        """
+        for sig in self.poll():
+            token_mint = sig.token_mint or self._resolve_token_mint(sig)
+            if not token_mint:
+                logger.warning(f"[watcher] Unable to resolve token mint for signal: {sig}")
+                continue
+
+            # Enforce "buy once per burner" is handled inside Copier.
+            ok = self.copier.execute_copy_trade(
+                market="Jupiter",
+                token_mint=token_mint,
+                role="burner",  # explicit, matches our one-per-burner policy
+            )
+            if ok:
+                logger.info(f"[watcher] First-time buy placed for {token_mint} from {sig.source}")
+            else:
+                logger.info(f"[watcher] Duplicate buy skipped for {token_mint} from {sig.source}")
+
+    # --- helpers ------------------------------------------------------------
+
+    def _resolve_token_mint(self, sig: TradeSignal) -> Optional[str]:
+        """
+        Resolve the SPL token mint from the signal. You MUST implement this for real:
+        - If you have a pool/market id, query your DEX/router to get the output token mint.
+        - If you only have a symbol, map it via your token list.
+        - Prefer chain data over symbols to avoid spoofing.
+        """
+        # EXAMPLE PLACEHOLDER LOGIC — replace with actual resolver
+        # Try explicit mint first
+        if sig.token_mint:
+            return sig.token_mint
+
+        # Example mapping by symbol (load from a JSON token list in production)
+        SYMBOL_TO_MINT = {
+            # "SOL":  "So11111111111111111111111111111111111111112",
+            # "USDC": "Es9vMFrzaCERz8hZK...<snip>",
+        }
+        if sig.token_symbol and sig.token_symbol in SYMBOL_TO_MINT:
+            return SYMBOL_TO_MINT[sig.token_symbol]
+
+        # Example: derive from raw market id (stub)
+        # if sig.raw_market_id:
+        #     return lookup_mint_from_market(sig.raw_market_id)
+
+        return None
+
+
+
 ```
 
 ```python
