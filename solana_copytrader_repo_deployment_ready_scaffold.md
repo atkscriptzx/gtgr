@@ -1227,7 +1227,7 @@ class TrailingExit:
         return (current <= peak*(1 - self.drop))
 
 EurisTPSL = TrailingExit(0.36, 0.00001)
-CupesyTPSL = TrailingExit(0.10, 0.00001)
+CupesyTPSL = TrailingExit(0.20, 0.00001)
 ```
 
 ```python
