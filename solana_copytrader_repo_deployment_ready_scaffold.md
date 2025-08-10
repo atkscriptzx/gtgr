@@ -154,14 +154,18 @@ version = "0.1.0"
 description = "Fully automated stealth Solana copy-trading bot"
 requires-python = ">=3.11"
 dependencies = [
-    "python-dotenv==1.0.1",
-    "pydantic==2.8.2",
-    "loguru==0.7.2",
-    "requests==2.32.3",
-    "python-telegram-bot==21.4",
-    "pyyaml==6.0.2",
-    "croniter==3.0.3"
+  "python-dotenv==1.0.1",
+  "pydantic==2.8.2",
+  "loguru==0.7.2",
+  "requests==2.32.3",
+  "python-telegram-bot==21.4",
+  "pyyaml==6.0.2",
+  "croniter==3.0.3",
+  "solana>=0.30.2",
+  "solders>=0.20.0",
+  "base58>=2.1.1",
 ]
+
 
 [tool.ruff]
 line-length = 100
@@ -200,14 +204,14 @@ cd "$PROJECT_DIR"
 source .venv/bin/activate
 
 # 1) Drain burners & funders → collector at 04:45
-python -m src/flows/burner_flow --force-drain
-python -m src/flows/funder_rotation --force-drain
+python -m src/flow/burner_flow --force-drain
+python -m src/flow/funder_rotation --force-drain
 
 # 2) Collector → DEX + proxies (at 04:50)
-python -m src/flows/collector_flow
+python -m src/flow/collector_flow
 
 # 3) Rotate funders & regenerate wallets (at 05:00)
-python -m src/flows/funder_rotation --rotate
+python -m src/flow/funder_rotation --rotate
 ```
 
 
@@ -231,7 +235,7 @@ set -e
 BOT_NAME="copytrader"
 if ! pgrep -f "$BOT_NAME" > /dev/null; then
     echo "[SELF-HEAL] Bot not running — restarting..."
-    systemctl --user restart copytrader.service
+    systemctl restart copytrader.service
 fi
 ```
 
@@ -486,13 +490,16 @@ WantedBy=timers.target
 ```
 
 ```ini
-# deploy/copytrader-health.service
+# deploy/copytrader-health.service 
 [Unit]
 Description=Healthcheck for CopyTrader
+
 [Service]
 Type=oneshot
-WorkingDirectory=%h/solana-copytrader
-ExecStart=%h/solana-copytrader/.venv/bin/python scripts/check_rpc_latency.py
+User=ubuntu
+WorkingDirectory=/home/ubuntu/solana-copytrader
+ExecStart=/home/ubuntu/solana-copytrader/.venv/bin/python /home/ubuntu/solana-copytrader/scripts/check_rpc_latency.py
+
 ```
 
 ```ini
@@ -1116,19 +1123,30 @@ class Swapper:
 ## Flows
 
 ```python
-# src/flow/burner.py 
+# src/flow/burner.py
 from loguru import logger
 from src.core.config import CFG
+from src.core.state import State
 from src.solana.client import SolanaClient
 from src.solana.wallet_manager import WalletManager
 
+
 class BurnerFlow:
-    def __init__(self, sol:SolanaClient, wm:WalletManager, burner_keyfile:str, collector_addr:str, funder_active_keyfile:str):
+    def __init__(
+        self,
+        sol: SolanaClient,
+        wm: WalletManager,
+        burner_keyfile: str,
+        collector_addr: str,
+        funder_active_keyfile: str,
+        notify_cb=None,  # optional: pass a function to send TG alerts
+    ):
         self.sol = sol
         self.wm = wm
         self.burner_keyfile = burner_keyfile
         self.collector_addr = collector_addr
         self.funder_active_keyfile = funder_active_keyfile
+        self.notify_cb = notify_cb
 
     def on_trade_profit(self):
         bal = self.sol.get_balance(self.burner_keyfile)
@@ -1139,22 +1157,32 @@ class BurnerFlow:
         self.drain_and_recreate()
 
     def _fund_new_burner(self):
-        # transfer 5 SOL from active funder to new burner
+        # TODO: implement real transfer (5 SOL) from active funder to new burner
         logger.info("Funding new burner with 5 SOL from active funder (stub)")
 
     def drain_and_recreate(self):
+        # 1) Drain current burner to collector
         bal = self.sol.get_balance(self.burner_keyfile)
         if bal > 0:
             self.sol.transfer(self.burner_keyfile, self.collector_addr, bal)
         logger.info("Burner drained; burning & recreating")
-        self.wm.replace_wallet("burner", CFG.BURNER_KEY if hasattr(CFG, 'BURNER_KEY') else 'burner.json')
-        self._fund_new_burner()
 
- # NEW: reset token buy registry for burner
+        # 2) Burn & regenerate burner key (same filename, new pubkey in state.json)
+        self.wm.replace_wallet("burner", CFG.BURNER_KEY if hasattr(CFG, "BURNER_KEY") else "burner.json")
+
+        # 3) Reset the “buy once per burner” registry
         State().clear_role_token_buys("burner")
 
+        # 4) Seed the new burner with 5 SOL from active funder
         self._fund_new_burner()
-        self._notify_regen()  # optional: send Telegram alert if you have it
+
+        # 5) Optional notification
+        if self.notify_cb:
+            try:
+                self.notify_cb("burner_regenerated")
+            except Exception as e:
+                logger.warning(f"notify_cb failed: {e}")
+
 ```
 
 ```python
