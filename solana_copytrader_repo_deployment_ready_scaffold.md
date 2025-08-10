@@ -613,7 +613,6 @@ logger.add(Path(CFG.log_dir, 'copytrader.log'), rotation='10 MB', retention='14 
 
 ```python
 # src/core/telemetry.py
-# src/core/telemetry.py
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Callable
@@ -721,6 +720,14 @@ DEFAULT = {
         "proxy2": {"pubkey": None},
         "hold_hot": {"pubkey": None},
         "hold_cold": {"pubkey": None},
+ },
+    # NEW: registry of tokens bought per wallet role
+    "tokens_bought": {
+        "burner": [],   # list of token mint addresses already bought
+        "collector": [],
+        "funder_active": [],
+        "funder_next": [],
+        "funder_standby": []
     }
 }
 
@@ -749,6 +756,21 @@ class State:
 
     def get_pubkey(self, role: str) -> str | None:
         return self._cache.get("wallets", {}).get(role, {}).get("pubkey")
+
+# === NEW HELPERS FOR TOKEN BUY LIMITS ===
+    def has_bought_token(self, role: str, token_mint: str) -> bool:
+        tb = self._cache.setdefault("tokens_bought", {}).setdefault(role, [])
+        return token_mint in tb
+
+    def record_token_buy(self, role: str, token_mint: str) -> None:
+        tb = self._cache.setdefault("tokens_bought", {}).setdefault(role, [])
+        if token_mint not in tb:
+            tb.append(token_mint)
+            self.save()
+
+    def clear_role_token_buys(self, role: str) -> None:
+        self._cache.setdefault("tokens_bought", {})[role] = []
+        self.save()
 ```
 
 ```python
@@ -1094,7 +1116,7 @@ class Swapper:
 ## Flows
 
 ```python
-# src/flow/burner.py (regen wired)
+# src/flow/burner.py 
 from loguru import logger
 from src.core.config import CFG
 from src.solana.client import SolanaClient
@@ -1127,10 +1149,16 @@ class BurnerFlow:
         logger.info("Burner drained; burning & recreating")
         self.wm.replace_wallet("burner", CFG.BURNER_KEY if hasattr(CFG, 'BURNER_KEY') else 'burner.json')
         self._fund_new_burner()
+
+ # NEW: reset token buy registry for burner
+        State().clear_role_token_buys("burner")
+
+        self._fund_new_burner()
+        self._notify_regen()  # optional: send Telegram alert if you have it
 ```
 
 ```python
-# src/flow/collector.py (regen wired)
+# src/flow/collector.py 
 from loguru import logger
 from src.core.config import CFG
 from src.core.timeutils import jitter
@@ -1155,7 +1183,7 @@ class CollectorFlow:
 ```
 
 ```python
-# src/flow/funders.py (regen wired)
+# src/flow/funders.py 
 from loguru import logger
 from src.solana.client import SolanaClient
 from src.solana.wallet_manager import WalletManager
@@ -1233,11 +1261,35 @@ CupesyTPSL = TrailingExit(0.20, 0.00001)
 ```python
 # src/trading/copier.py
 from loguru import logger
+from src.core.state import State
+
 class Copier:
-    def __init__(self, trade_size_sol:float):
+    def __init__(self, trade_size_sol:float, default_role:str="burner"):
         self.size = trade_size_sol
-    def execute_copy_trade(self, market:str):
-        logger.info(f"Executing copy trade on {market} with {self.size} SOL")
+        self.role = default_role
+        self.state = State()
+
+    def can_buy(self, token_mint:str, role:str|None=None) -> bool:
+        r = role or self.role
+        if self.state.has_bought_token(r, token_mint):
+            logger.info(f"[copier] SKIP duplicate buy for {token_mint} (role={r})")
+            return False
+        return True
+
+    def record_buy(self, token_mint:str, role:str|None=None) -> None:
+        r = role or self.role
+        self.state.record_token_buy(r, token_mint)
+
+    def execute_copy_trade(self, market:str, token_mint:str, role:str|None=None):
+        r = role or self.role
+        if not self.can_buy(token_mint, r):
+            return False  # no-op
+        # TODO: real DEX buy goes here
+        logger.info(f"Executing FIRST-TIME buy on {market} token={token_mint} with {self.size} SOL (role={r})")
+        # If swap succeeds:
+        self.record_buy(token_mint, r)
+        return True
+
 ```
 
 ```python
