@@ -172,7 +172,6 @@ dependencies = [
   "base58>=2.1.1",
 ]
 
-
 [tool.ruff]
 line-length = 100
 ```
@@ -216,9 +215,7 @@ python -m src.sched.at_0450_dex
 # 3) 05:00 rotate
 python -m src.sched.at_0500_rotate
 
-
 ```
-
 
 ```bash
 #scripts/rotate_now.sh
@@ -279,63 +276,6 @@ for file in "$KEY_DIR"/*.json; do
    out="$BACKUP_DIR/$(basename "$file").gpg"
     gpg --yes --encrypt --armor --recipient "$RECIPIENT" --output "$out" "$file"
 done
-```
-
-```bash
-#src/utils/check_rpc_latency.py
-import requests, time, subprocess, os, sys
-
-RPC_POOL_FILE = os.getenv("RPC_POOL_FILE", "config/rpc_pool.txt")
-LATENCY_LIMIT_MS = 500
-
-def check_latency(url):
-    start = time.time()
-    try:
-        requests.post(url, json={"jsonrpc":"2.0","id":1,"method":"getHealth"}, timeout=2)
-        return (time.time() - start) * 1000
-    except Exception:
-        return float("inf")
-
-def main():
-    with open(RPC_POOL_FILE) as f:
-        rpcs = [line.strip() for line in f if line.strip()]
-    bad = []
-    for rpc in rpcs:
-        latency = check_latency(rpc)
-        print(f"{rpc} latency: {latency:.2f} ms")
-        if latency > LATENCY_LIMIT_MS:
-            bad.append(rpc)
-        if len(bad) == len(rpcs):
-        print("[!] All RPCs slow — rotating...")
-        subprocess.run([sys.executable, "src/utils/reset_rpc.py"], check=False)
-
-if __name__ == "__main__":
-    main()
-```
-
-```bash
-#src/utils/reset_rpc.py
-import random, os, json
-
-RPC_POOL_FILE = os.getenv("RPC_POOL_FILE", "config/rpc_pool.txt")
-STATE_FILE = "data/state.json"
-
-def main():
-    with open(RPC_POOL_FILE) as f:
-        rpcs = [line.strip() for line in f if line.strip()]
-    new_rpc = random.choice(rpcs)
-    print(f"[RPC RESET] Switching to {new_rpc}")
-
-    state = {}
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE) as f:
-            state = json.load(f)
-    state["active_rpc"] = new_rpc
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
-
-if __name__ == "__main__":
-    main()
 ```
 
 ```bash
@@ -599,8 +539,33 @@ def main():
 if __name__ == "__main__":
     main()
 
-
 ```
+
+```python
+#src/utils/reset_rpc.py
+import random, os, json
+
+RPC_POOL_FILE = os.getenv("RPC_POOL_FILE", "config/rpc_pool.txt")
+STATE_FILE = "data/state.json"
+
+def main():
+    with open(RPC_POOL_FILE) as f:
+        rpcs = [line.strip() for line in f if line.strip()]
+    new_rpc = random.choice(rpcs)
+    print(f"[RPC RESET] Switching to {new_rpc}")
+
+    state = {}
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE) as f:
+            state = json.load(f)
+    state["active_rpc"] = new_rpc
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
+
+if __name__ == "__main__":
+    main()
+```
+
 ```python
 # src/core/config.py
 from pydantic import BaseModel, Field
@@ -625,9 +590,10 @@ def _env_list(name: str) -> list[str]:
     v = os.getenv(name, "")
     return [x for x in (s.strip() for s in v.split(",")) if x]
 class Splits(BaseModel):
-   tc: float = Field(default_factory=lambda: _env_float("SWAP_SPLIT_BTC", 0.50))
+    btc: float = Field(default_factory=lambda: _env_float("SWAP_SPLIT_BTC", 0.50))
     eth: float = Field(default_factory=lambda: _env_float("SWAP_SPLIT_ETH", 0.25))
     xrp: float = Field(default_factory=lambda: _env_float("SWAP_SPLIT_XRP", 0.25))
+
  
 
 
@@ -1303,21 +1269,23 @@ from src.core.timeutils import jitter
 from src.dex.client import DexClient
 from src.solana.client import SolanaClient
 from src.solana.wallet_manager import WalletManager
+from src.dex.client import SwapAlloc
 
 class CollectorFlow:
     def __init__(self, sol:SolanaClient, dex:DexClient, wm:WalletManager, collector_keyfile:str):
         self.sol=sol; self.dex=dex; self.wm=wm; self.collector_keyfile=collector_keyfile
 
     def run_0450(self):
-        bal = self.sol.get_balance(self.collector_keyfile)
-        remaining = bal
-        while remaining > 0:
-            chunk = min(CFG.dex.chunk_size_sol, remaining)
-            self.dex.swap_sol_to_alloc(self.collector_keyfile, chunk, CFG.dex.splits)
-            remaining -= chunk
-            jitter(CFG.dex.delay_s_min, CFG.dex.delay_s_max)
-        logger.info("Collector emptied to DEX; burn & recreate")
-        self.wm.replace_wallet("collector", CFG.COLLECTOR_KEY if hasattr(CFG, 'COLLECTOR_KEY') else 'collector.json')
+    bal = self.sol.get_balance(self.collector_keyfile)
+    remaining = bal
+    alloc = SwapAlloc(CFG.dex.splits.btc, CFG.dex.splits.eth, CFG.dex.splits.xrp)
+    while remaining > 0:
+        chunk = min(CFG.dex.chunk_size_sol, remaining)
+        self.dex.swap_sol_to_alloc(self.collector_keyfile, chunk, alloc)
+        remaining -= chunk
+        jitter(CFG.dex.delay_s_min, CFG.dex.delay_s_max)
+    logger.info("Collector emptied to DEX; burn & recreate")
+    self.wm.replace_wallet("collector", CFG.COLLECTOR_KEY if hasattr(CFG, 'COLLECTOR_KEY') else 'collector.json')
 ```
 
 ```python
@@ -1339,18 +1307,19 @@ class FunderRotation:
         self.collector=collector_addr
 
     def ensure_active_has_5(self):
-    """Top up ACTIVE funder to 5 SOL from collector as needed."""
-    try:
-        bal = self.sol.get_balance(self.active_kf)
-        need = max(0.0, 5.0 - bal)
-        if need > 0:
-            self.sol.transfer(
-                str(KeyStore.path(CFG.COLLECTOR_KEY)),  # source = collector keyfile
-                self._pubkey_of(self.active_kf),        # dest   = active funder pubkey
-                need,
-            )
-    except Exception as e:
-        logger.exception(f"ensure_active_has_5 failed: {e}")
+        """Top up ACTIVE funder to 5 SOL from collector as needed."""
+        try:
+            bal = self.sol.get_balance(self.active_kf)
+            need = max(0.0, 5.0 - bal)
+            if need > 0:
+                self.sol.transfer(
+                    str(KeyStore.path(CFG.COLLECTOR_KEY)),  # source = collector keyfile
+                    self._pubkey_of(self.active_kf),        # dest   = active funder pubkey
+                    need,
+                )
+        except Exception as e:
+            logger.exception(f"ensure_active_has_5 failed: {e}")
+
 
     def rotate(self):
         logger.info("Rotating funders: active->(burn if empty), next->active, standby->next, new standby")
