@@ -1156,32 +1156,35 @@ class BurnerFlow:
     def forced_drain(self):
         self.drain_and_recreate()
 
-    def _fund_new_burner(self):
-        # TODO: implement real transfer (5 SOL) from active funder to new burner
-        logger.info("Funding new burner with 5 SOL from active funder (stub)")
+     def _fund_new_burner(self):
+        """
+        Send 5 SOL from the active funder to the freshly-created burner.
+        Assumes WalletManager.replace_wallet() already refreshed the burner keyfile/state.
+       """
+        from src.core.state import State
+        new_burner_addr = State().get_pubkey("burner")
+        if not new_burner_addr:
+            logger.error("No burner pubkey in state; cannot fund new burner.")
+            return
+        try:
+            self.sol.transfer(self.funder_active_keyfile, new_burner_addr, 5.0)
+            logger.info("Seeded new burner with 5.0 SOL from active funder.")
+        except Exception as e:
+            logger.exception(f"Failed to fund new burner: {e}")
 
     def drain_and_recreate(self):
-        # 1) Drain current burner to collector
+         # 1) Drain current burner to collector
+
         bal = self.sol.get_balance(self.burner_keyfile)
-        if bal > 0:
-            self.sol.transfer(self.burner_keyfile, self.collector_addr, bal)
-        logger.info("Burner drained; burning & recreating")
+         if bal > 0:
+             self.sol.transfer(self.burner_keyfile, self.collector_addr, bal)
+         logger.info("Burner drained; burning & recreating")
+ 
+         # 2) Burn & regenerate burner key (same filename, new pubkey in state.json)
+         self.wm.replace_wallet("burner", CFG.BURNER_KEY if hasattr(CFG, "BURNER_KEY") else "burner.json")
 
-        # 2) Burn & regenerate burner key (same filename, new pubkey in state.json)
-        self.wm.replace_wallet("burner", CFG.BURNER_KEY if hasattr(CFG, "BURNER_KEY") else "burner.json")
-
-        # 3) Reset the “buy once per burner” registry
-        State().clear_role_token_buys("burner")
-
-        # 4) Seed the new burner with 5 SOL from active funder
-        self._fund_new_burner()
-
-        # 5) Optional notification
-        if self.notify_cb:
-            try:
-                self.notify_cb("burner_regenerated")
-            except Exception as e:
-                logger.warning(f"notify_cb failed: {e}")
+         # 4) Seed the new burner with 5 SOL from active funder
+         self._fund_new_burner()
 
 ```
 
@@ -1215,6 +1218,11 @@ class CollectorFlow:
 from loguru import logger
 from src.solana.client import SolanaClient
 from src.solana.wallet_manager import WalletManager
+from pathlib import Path
+import json
+from src.solana.keypair_io import load_keypair_from_file
+from src.core.state import State
+from src.core.keystore import KeyStore
 
 class FunderRotation:
     def __init__(self, sol:SolanaClient, wm:WalletManager, active_kf:str, next_kf:str, standby_kf:str, collector_addr:str):
@@ -1226,13 +1234,66 @@ class FunderRotation:
         # top up active to 5 SOL from collector as needed
         pass
 
+"""Top up ACTIVE funder to 5 SOL from collector as needed."""
+        try:
+            bal = self.sol.get_balance(self.active_kf)
+            need = max(0.0, 5.0 - bal)
+            if need > 0:
+                logger.info(f"Topping up active funder by {need:.4f} SOL from collector")
+                self.sol.transfer(self.collector, self._pubkey_of(self.active_kf), need)
+        except Exception as e:
+            logger.exception(f"ensure_active_has_5 failed: {e}")
+
     def rotate(self):
-        logger.info("Rotating funders: active->burn (if empty), next->active, standby->next, new standby")
+        #logger.info("Rotating funders: active->burn (if empty), next->active, standby->next, new standby")
         # burn active ONLY if empty
-        if self.sol.get_balance(self.active_kf) == 0:
-            self.wm.burn_wallet("funder_active", self.active_kf)
-        # logical promotion (filenames remain constant); generate new standby keyfile
+        #if self.sol.get_balance(self.active_kf) == 0:
+            #self.wm.burn_wallet("funder_active", self.active_kf)
+        #logical promotion (filenames remain constant); generate new standby keyfile
+       #self.wm.replace_wallet("funder_standby", self.standby_kf)
+
+Promote NEXT -> ACTIVE, STANDBY -> NEXT, then create a fresh STANDBY.
+       Filenames remain constant; we overwrite the destination files with the
+        source key material and then regenerate the source to avoid duplicates.
+        """
+        logger.info("Rotating funders: active->(burn if empty), next->active, standby->next, new standby")
+        state = State()
+
+        # 0) Burn ACTIVE only if empty (per design)
+        try:
+            if self.sol.get_balance(self.active_kf) == 0:
+                self.wm.burn_wallet("funder_active", self.active_kf)
+        except Exception as e:
+            logger.warning(f"Could not check/burn active funder: {e}")
+
+        # 1) Copy NEXT -> ACTIVE (overwrite active file)
+        self._copy_keyfile(src=self.next_kf, dst=self.active_kf)
+        active_pub = self._pubkey_of(self.active_kf)
+        state.set_pubkey("funder_active", active_pub)
+
+        # 2) Copy STANDBY -> NEXT
+        self._copy_keyfile(src=self.standby_kf, dst=self.next_kf)
+        next_pub = self._pubkey_of(self.next_kf)
+        state.set_pubkey("funder_next", next_pub)
+
+        # 3) Regenerate STANDBY fresh
         self.wm.replace_wallet("funder_standby", self.standby_kf)
+
+        logger.info(f"Rotation complete. ACTIVE={active_pub} NEXT={next_pub}")
+
+    # --- helpers -----------------------------------------------------------
+    def _copy_keyfile(self, src:str, dst:str):
+        sp = KeyStore.path(src); dp = KeyStore.path(dst)
+        if not sp.exists():
+            raise FileNotFoundError(f"Missing source keyfile: {sp}")
+        data = json.loads(sp.read_text())
+        dp.parent.mkdir(parents=True, exist_ok=True)
+        dp.write_text(json.dumps(data, separators=(',',':')))
+
+    def _pubkey_of(self, keyfile:str) -> str:
+        kp = load_keypair_from_file(KeyStore.path(keyfile))
+        return str(kp.pubkey())
+
 ```
 
 ```python
@@ -1252,10 +1313,58 @@ class ProxyRouter:
 
 ```python
 # src/flow/rotation.py
+
 from loguru import logger
+from src.core.config import CFG
+from src.core.state import State
+from src.solana.client import SolanaClient
+from src.solana.wallet_manager import WalletManager
+from src.flow.burner import BurnerFlow
+from src.flow.collector import CollectorFlow
+from src.flow.funders import FunderRotation
+from src.dex.client import DexClient
+from src.core.keystore import KeyStore
+
 class DailyRotation:
     def execute(self):
-        logger.info("04:45 drain -> 04:50 DEX -> 05:00 rotate sequence")
+        logger.info("⏱ 04:45 drain -> 04:50 DEX -> 05:00 rotate sequence")
+        state = State()
+        wm = WalletManager(state)
+        sol = SolanaClient()
+        dex = DexClient(CFG.dex.endpoint)
+
+        collector_addr = state.get_pubkey("collector")
+        if not collector_addr:
+            logger.error("Collector address missing in state.json — aborting rotation.")
+            return
+
+        # 04:45 — Drain burner and recreate
+        BurnerFlow(
+            sol=sol,
+            wm=wm,
+            burner_keyfile=str(KeyStore.path(CFG.BURNER_KEY)),
+            collector_addr=collector_addr,
+            funder_active_keyfile=str(KeyStore.path(CFG.FUNDER_ACTIVE_KEY)),
+        ).forced_drain()
+
+        # 04:50 — Collector -> DEX in chunks; recreate collector
+        CollectorFlow(
+            sol=sol, dex=dex, wm=wm, collector_keyfile=str(KeyStore.path(CFG.COLLECTOR_KEY))
+        ).run_0450()
+
+        # 05:00 — Funder rotation and ensure ACTIVE has 5 SOL
+        fr = FunderRotation(
+            sol=sol,
+            wm=wm,
+            active_kf=CFG.FUNDER_ACTIVE_KEY,
+            next_kf=CFG.FUNDER_NEXT_KEY,
+            standby_kf=CFG.FUNDER_STANDBY_KEY,
+            collector_addr=collector_addr,
+        )
+        fr.rotate()
+        fr.ensure_active_has_5()
+        logger.info("✅ Daily rotation finished.")
+
 ```
 
 ---
@@ -1268,7 +1377,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Optional
 from loguru import logger
-
+from pathlib import Path
+import json
 from src.core.config import CFG
 from src.trading.copier import Copier
 
@@ -1293,12 +1403,35 @@ class WalletWatcher:
 
     def poll(self):
         """
-        Poll your tracked addresses (Cupesy, Euris) and emit TradeSignal events.
-        Replace the stub with your actual logic.
+        Read signals from data/signals.json (if present) and emit TradeSignal items.
+        This gives you a quick path to integration; your on-chain watcher can write
+        the file as a list of dicts, then this loader consumes & clears it.
         """
         logger.debug(f"Watching {len(self.addresses)} wallets")
-        # STUB: yield no signals by default
-        yield from ()
+        path = Path("data/signals.json")
+        if not path.exists():
+            return
+        try:
+            raw = json.loads(path.read_text())
+            if isinstance(raw, list):
+                for r in raw:
+                    yield TradeSignal(
+                        source=r.get("source","Unknown"),
+                        raw_market_id=r.get("raw_market_id"),
+                        token_symbol=r.get("token_symbol"),
+                        token_mint=r.get("token_mint"),
+                    )
+            else:
+                logger.warning("signals.json is not a list; skipping.")
+        except Exception as e:
+            logger.exception(f"Failed reading signals.json: {e}")
+        finally:
+            # Clear signals once consumed
+            try:
+                path.write_text("[]")
+            except Exception:
+                pass
+
 
     def handle_signals(self):
         """
@@ -1420,16 +1553,17 @@ class DryRun:
 # src/security/ip_guard.py
 from loguru import logger
 from src.core.config import CFG
+import requests
 
 class IpGuard:
     def current_ip(self) -> str:
+       try:
+            r = requests.get("https://api.ipify.org?format=text", timeout=2.5)
+            if r.ok and r.text.strip():
+                return r.text.strip()
+        except Exception:
+            pass
         return '0.0.0.0'
-    def is_whitelisted(self) -> bool:
-        ip = self.current_ip()
-        ok = (ip in CFG.whitelist_ips)
-        if not ok:
-            logger.error(f"Unknown IP {ip}")
-        return ok
 ```
 
 ```python
@@ -1589,12 +1723,50 @@ from src.telegram.bot import TGBot
 from src.security.kill_switch import KillSwitch
 from src.solana.wallet_manager import WalletManager
 from src.core.state import State
+from src.solana.client import SolanaClient
+from src.core.keystore import KeyStore
+import os, shutil
+
 
 def drain_all():
-    logger.warning("Draining all active wallets to collector (stub)")
+    """Drain burner + funders + proxies to collector address (best-effort)."""
+    sol = SolanaClient()
+    state = State()
+    collector_addr = state.get_pubkey("collector")
+    if not collector_addr:
+        logger.error("No collector pubkey in state; cannot drain.")
+        return
+
+    keyfiles = [
+        CFG.BURNER_KEY,
+        CFG.FUNDER_ACTIVE_KEY,
+        CFG.FUNDER_NEXT_KEY,
+        CFG.FUNDER_STANDBY_KEY,
+        getattr(CFG, "PROXY1_KEY", "proxy1.json"),
+        getattr(CFG, "PROXY2_KEY", "proxy2.json"),
+    ]
+    for kf in keyfiles:
+        path = str(KeyStore.path(kf))
+        try:
+            bal = sol.get_balance(path)
+            if bal > 0:
+                sol.transfer(path, collector_addr, bal)
+                logger.info(f"Drained {bal:.6f} SOL from {kf} -> collector")
+        except Exception as e:
+            logger.warning(f"Drain failed for {kf}: {e}")
+ 
 
 def reboot_bot():
-    logger.warning("Rebooting bot (stub)")
+    """
+    Try to restart via systemd if available; otherwise exit and let a supervisor restart us.
+    """
+    svc = os.getenv("SYSTEMD_SERVICE_NAME", "copytrader.service")
+    if shutil.which("systemctl"):
+        os.system(f"sudo systemctl restart {svc}")
+        logger.warning(f"Requested systemd restart of {svc}")
+    else:
+        logger.warning("Exiting for external supervisor to restart...")
+        os._exit(0)
 
 def main():
     logger.info(f"Starting CopyTrader in {CFG.env} mode")
