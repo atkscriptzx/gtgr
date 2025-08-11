@@ -2146,10 +2146,12 @@ def test_daily_rotation_smoke(monkeypatch):
     DailyRotation().execute()
     # If no exceptions, consider it a pass (this is a smoke test)
     assert True
+
+```
+
 ---
 
-### Notes
-
+## Notes
 - All regen points call `WalletManager.replace_wallet(role, filename)` and update `data/state.json`.
 - Filenames in `.env` remain constant; you will see **new pubkeys** after burns.
 - Replace stub keygen/transfer with your preferred Solana libraries for production.
