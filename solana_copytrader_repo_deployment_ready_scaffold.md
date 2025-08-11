@@ -209,13 +209,13 @@ PROJECT_DIR="$(dirname "$(dirname "$(realpath "$0")")")"
 cd "$PROJECT_DIR"
 source .venv/bin/activate
 
-# Use the same scheduled entrypoints as cron for consistency
-# 1) Drain burners & funders → collector at 04:45
+# 1) 04:45 drain
 python -m src.sched.at_0445_drain
-# 2) Collector → DEX + proxies (at 04:50)
+# 2) 04:50 DEX
 python -m src.sched.at_0450_dex
-# 3) Rotate funders & regenerate wallets (at 05:00)
+# 3) 05:00 rotate
 python -m src.sched.at_0500_rotate
+
 
 ```
 
@@ -229,7 +229,8 @@ PROJECT_DIR="$(dirname "$(dirname "$(realpath "$0")")")"
 cd "$PROJECT_DIR"
 source .venv/bin/activate
 
-python -m src/flow/rotation.py --rotate
+python -m src.flow.rotation --rotate
+
 ```
 
 ```bash
@@ -562,14 +563,16 @@ WantedBy=timers.target
 
 ```
 
-## Utilis
+---
+
+## Core and Utils
 
 ```python
 #src/utils/check_rpc_latency.py
-import requests, time, subprocess, os, sys
+import os, sys, time, subprocess, requests
 
 RPC_POOL_FILE = os.getenv("RPC_POOL_FILE", "config/rpc_pool.txt")
-LATENCY_LIMIT_MS = 500
+LATENCY_LIMIT_MS = int(os.getenv("RPC_LATENCY_MS_THRESHOLD", "500"))
 
 def check_latency(url):
     start = time.time()
@@ -581,27 +584,24 @@ def check_latency(url):
 
 def main():
     with open(RPC_POOL_FILE) as f:
-        rpcs = [line.strip() for line in f if line.strip()]
+        rpcs = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
     bad = []
     for rpc in rpcs:
         latency = check_latency(rpc)
         print(f"{rpc} latency: {latency:.2f} ms")
         if latency > LATENCY_LIMIT_MS:
             bad.append(rpc)
-        if len(bad) == len(rpcs):
+
+    if len(bad) == len(rpcs):
         print("[!] All RPCs slow — rotating...")
         subprocess.run([sys.executable, "src/utils/reset_rpc.py"], check=False)
 
 if __name__ == "__main__":
     main()
+
 ```
----
-
-## Core
-
 ```python
 # src/core/config.py
-from pydantic import BaseModel
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 import os
@@ -624,7 +624,7 @@ def _env_list(name: str) -> list[str]:
     v = os.getenv(name, "")
     return [x for x in (s.strip() for s in v.split(",")) if x]
 class Splits(BaseModel):
-   btc: float = Field(default_factory=lambda: _env_float("SWAP_SPLIT_BTC", 0.50))
+   tc: float = Field(default_factory=lambda: _env_float("SWAP_SPLIT_BTC", 0.50))
     eth: float = Field(default_factory=lambda: _env_float("SWAP_SPLIT_ETH", 0.25))
     xrp: float = Field(default_factory=lambda: _env_float("SWAP_SPLIT_XRP", 0.25))
  
@@ -981,7 +981,6 @@ from solana.rpc.api import Client
 from solana.rpc.types import TxOpts
 from solana.transaction import Transaction
 from solana.system_program import TransferParams, transfer
-
 from src.solana.keypair_io import load_keypair_from_file
 from src.core.config import CFG
 from src.core.state import State
@@ -1076,14 +1075,12 @@ class SolanaClient:
             signature = str(resp.get("result"))
         logger.info(f"[transfer] {amount_sol} SOL -> {dst_addr} sig={signature}")
 
-        # (optional) confirm
-       try:
+        try:
             conf = self.client.confirm_transaction(signature)
             if not self._resp_ok(conf):
                 logger.warning(f"[transfer] confirm error: {conf}")
         except Exception as e:
             logger.warning(f"[transfer] confirm exception: {e}")
- 
         return TxResult(sig=signature)
 
     def burn_wallet(self, key_path: str):
@@ -1247,17 +1244,8 @@ from src.core.state import State
 from src.solana.client import SolanaClient
 from src.solana.wallet_manager import WalletManager
 
-
 class BurnerFlow:
-    def __init__(
-        self,
-        sol: SolanaClient,
-        wm: WalletManager,
-        burner_keyfile: str,
-        collector_addr: str,
-        funder_active_keyfile: str,
-        notify_cb=None,  # optional: pass a function to send TG alerts
-    ):
+    def __init__(self, sol: SolanaClient, wm: WalletManager, burner_keyfile: str, collector_addr: str, funder_active_keyfile: str, notify_cb=None):
         self.sol = sol
         self.wm = wm
         self.burner_keyfile = burner_keyfile
@@ -1273,12 +1261,7 @@ class BurnerFlow:
     def forced_drain(self):
         self.drain_and_recreate()
 
-     def _fund_new_burner(self):
-        """
-        Send 5 SOL from the active funder to the freshly-created burner.
-        Assumes WalletManager.replace_wallet() already refreshed the burner keyfile/state.
-       """
-        from src.core.state import State
+    def _fund_new_burner(self):
         new_burner_addr = State().get_pubkey("burner")
         if not new_burner_addr:
             logger.error("No burner pubkey in state; cannot fund new burner.")
@@ -1290,18 +1273,19 @@ class BurnerFlow:
             logger.exception(f"Failed to fund new burner: {e}")
 
     def drain_and_recreate(self):
-         # 1) Drain current burner to collector
-
         bal = self.sol.get_balance(self.burner_keyfile)
-         if bal > 0:
-             self.sol.transfer(self.burner_keyfile, self.collector_addr, bal)
-         logger.info("Burner drained; burning & recreating")
- 
-         # 2) Burn & regenerate burner key (same filename, new pubkey in state.json)
-         self.wm.replace_wallet("burner", CFG.BURNER_KEY if hasattr(CFG, "BURNER_KEY") else "burner.json")
+        if bal > 0:
+            self.sol.transfer(self.burner_keyfile, self.collector_addr, bal)
+        logger.info("Burner drained; burning & recreating")
 
-         # 4) Seed the new burner with 5 SOL from active funder
-         self._fund_new_burner()
+        self.wm.replace_wallet("burner", getattr(CFG, "BURNER_KEY", "burner.json"))
+        State().clear_role_token_buys("burner")
+        self._fund_new_burner()
+        if self.notify_cb:
+            try:
+                self.notify_cb("burner_regenerated")
+            except Exception as e:
+                logger.warning(f"notify_cb failed: {e}")
 
 ```
 
@@ -1348,10 +1332,6 @@ class FunderRotation:
         self.collector=collector_addr
 
     def ensure_active_has_5(self):
-        # top up active to 5 SOL from collector as needed
-        pass
-
-"""Top up ACTIVE funder to 5 SOL from collector as needed."""
         try:
             bal = self.sol.get_balance(self.active_kf)
             need = max(0.0, 5.0 - bal)
@@ -1362,40 +1342,23 @@ class FunderRotation:
             logger.exception(f"ensure_active_has_5 failed: {e}")
 
     def rotate(self):
-        #logger.info("Rotating funders: active->burn (if empty), next->active, standby->next, new standby")
-        # burn active ONLY if empty
-        #if self.sol.get_balance(self.active_kf) == 0:
-            #self.wm.burn_wallet("funder_active", self.active_kf)
-        #logical promotion (filenames remain constant); generate new standby keyfile
-       #self.wm.replace_wallet("funder_standby", self.standby_kf)
-
-Promote NEXT -> ACTIVE, STANDBY -> NEXT, then create a fresh STANDBY.
-       Filenames remain constant; we overwrite the destination files with the
-        source key material and then regenerate the source to avoid duplicates.
-        """
         logger.info("Rotating funders: active->(burn if empty), next->active, standby->next, new standby")
         state = State()
-
-        # 0) Burn ACTIVE only if empty (per design)
         try:
             if self.sol.get_balance(self.active_kf) == 0:
                 self.wm.burn_wallet("funder_active", self.active_kf)
         except Exception as e:
             logger.warning(f"Could not check/burn active funder: {e}")
 
-        # 1) Copy NEXT -> ACTIVE (overwrite active file)
         self._copy_keyfile(src=self.next_kf, dst=self.active_kf)
         active_pub = self._pubkey_of(self.active_kf)
         state.set_pubkey("funder_active", active_pub)
 
-        # 2) Copy STANDBY -> NEXT
         self._copy_keyfile(src=self.standby_kf, dst=self.next_kf)
         next_pub = self._pubkey_of(self.next_kf)
         state.set_pubkey("funder_next", next_pub)
 
-        # 3) Regenerate STANDBY fresh
         self.wm.replace_wallet("funder_standby", self.standby_kf)
-
         logger.info(f"Rotation complete. ACTIVE={active_pub} NEXT={next_pub}")
 
     # --- helpers -----------------------------------------------------------
@@ -1606,16 +1569,18 @@ class WalletWatcher:
 ```python
 # src/trading/tpsl.py
 class TrailingExit:
-    def __init__(self, start_pct:float, trail_drop_pct:float):
-        self.start=start_pct; self.drop=trail_drop_pct
-    def should_exit(self, peak:float, current:float):
+    def __init__(self, start_pct: float, trail_drop_pct: float):
+        self.start = start_pct
+        self.drop = trail_drop_pct
+
+    def should_exit(self, peak: float, current: float):
         if peak < (1 + self.start):
             return False
-         return current <= peak * (1 - self.drop)
+        return current <= peak * (1 - self.drop)
 
-# NOTE: Cupesy starts trailing at +20% with a 0.001% trail; Euris starts at +36% with a 0.001% trail.
+# Matches README: +20% / +36% start, 0.001% trail
 EurisTPSL = TrailingExit(0.36, 0.00001)
-CupesyTPSL = TrailingExit(0.20, 0.000001)
+CupesyTPSL = TrailingExit(0.20, 0.00001)
 
 ```
 
@@ -1676,22 +1641,21 @@ import requests
 
 class IpGuard:
     def current_ip(self) -> str:
-       try:
+        try:
             r = requests.get("https://api.ipify.org?format=text", timeout=2.5)
             if r.ok and r.text.strip():
                 return r.text.strip()
         except Exception:
             pass
-        return '0.0.0.0'
-def is_whitelisted(self) -> bool:
-        # If kill switch is disabled OR no whitelist is configured, do not enforce
+        return "0.0.0.0"
+
+    def is_whitelisted(self) -> bool:
         if not CFG.kill_switch_enabled:
             logger.info("Kill switch disabled; skipping IP check.")
             return True
         if not CFG.whitelist_ips:
             logger.warning("WHITELISTED_IPS empty; allowing all IPs. Configure this in production.")
             return True
-
         ip = self.current_ip()
         if ip == "0.0.0.0":
             logger.warning("Could not resolve current IP; allowing traffic to avoid false positives.")
@@ -1810,28 +1774,29 @@ def _is_admin(update: Update) -> bool:
     return bool(u and (u.id in ADMIN_IDS))
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
- if not _is_admin(update):
+    if not _is_admin(update):
         await update.message.reply_text("Not authorized.")
         return
+    ...
     logger.info("/status")
     await update.message.reply_text("Balances: ... (stub)")
 
 async def cmd_rotate_now(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-if not _is_admin(update):
+    if not _is_admin(update):
         await update.message.reply_text("Not authorized.")
         return
     logger.info("/rotate_now")
     await update.message.reply_text("Manual rotation kicked off.")
 
 async def cmd_sync(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-if not _is_admin(update):
+    if not _is_admin(update):
         await update.message.reply_text("Not authorized.")
         return
     logger.info("/sync")
     await update.message.reply_text("Health OK.")
 
 async def cmd_kill(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-   if not _is_admin(update):
+    if not _is_admin(update):
         await update.message.reply_text("Not authorized.")
         return
     text = (update.message.text or "").strip()
@@ -1853,13 +1818,13 @@ async def cmd_kill(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_vault_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-if not _is_admin(update):
+    if not _is_admin(update):
         await update.message.reply_text("Not authorized.")
         return
     await update.message.reply_text("Vault (Hot/Cold): ... (stub)")
 
 async def cmd_atpnl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-if not _is_admin(update):
+    if not _is_admin(update):
         await update.message.reply_text("Not authorized.")
         return
     await update.message.reply_text("All-time PnL: ... (stub)")
@@ -2091,8 +2056,8 @@ def test_wallet_manager_create_burn_replace(tmp_path):
     assert not KeyStore.path("burner.json").exists()
     assert state.get_pubkey("burner") is None
 
-    # 3) replace (burn + create) -> new pubkey different from previous
-     w2 = wm.replace_wallet("burner", "burner.json")
+       # 3) replace (burn + create) -> new pubkey different from previous
+    w2 = wm.replace_wallet("burner", "burner.json")
     assert KeyStore.path("burner.json").exists()
     assert w2.pubkey and w2.pubkey != w.pubkey
     assert state.get_pubkey("burner") == w2.pubkey
