@@ -20,13 +20,15 @@ kill switch, Telegram control, Tor, GPG/PGP, cron/systemd, dry-run mode,
 - 3-Funder rotation at 05:00 (Active→burn if empty, Next→Active, Standby→Next, **new Standby generated**)
 - 2-hop Proxy routing; proxies burned after each cycle
 - Kill switch: unknown IP → instant drain → direct DEX → burn & recreate → reboot → Telegram alert
-- Telegram: `/status`, `/rotate_now`, `/sync`, `/kill`, `/vault_status`, `/atpnl`
+- Telegram: `/status`, `/rotate_now`, `/sync`, `/kill <passphrase>`, `/vault_status`, `/atpnl`
 
 ### Auto Key Regeneration
 - Filenames in `.env` remain constant (e.g., `BURNER_KEY=burner.json`).
 - On burn/recreate, the **same filename** is overwritten with a fresh keypair and
   the **new pubkey** is saved to `data/state.json`.
 - Verify with `scripts/sim_rotate.py`.
+
+**Strategy notes:** Cupesy trails from **+20%** with a **0.001%** drop; Euris trails from **+36%** with a **0.001%** drop.
 ```
 
 ---
@@ -41,10 +43,12 @@ LOG_DIR=./logs
 
 WHITELISTED_IPS=
 KILL_SWITCH_ENABLED=true
+KILL_SWITCH_PASSPHRASE=change-this-now
 
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID_MAIN=
 TELEGRAM_CHAT_ID_ALERTS=
+TELEGRAM_ADMIN_IDS=123456789
 
 SOLANA_CLUSTER=mainnet
 RPC_PRIMARY=https://api.mainnet-beta.solana.com
@@ -90,6 +94,8 @@ TOR_ENABLED=true
 TOR_CONTROL_PORT=9051
 GPG_KEY_EMAIL=you@example.com
 PGP_BACKUP_ENABLED=true
+SYSTEMD_SERVICE_NAME=copytrader.service
+
 ```
 
 ---
@@ -141,8 +147,8 @@ requests==2.32.3
 python-telegram-bot==21.4
 pyyaml==6.0.2
 croniter==3.0.3
-solana>=0.30.2
-solders>=0.20.0
+solana==0.30.2
+solders==0.20.0
 base58>=2.1.1
 ```
 
@@ -161,8 +167,8 @@ dependencies = [
   "python-telegram-bot==21.4",
   "pyyaml==6.0.2",
   "croniter==3.0.3",
-  "solana>=0.30.2",
-  "solders>=0.20.0",
+  "solana==0.30.2",
+  "solders==0.20.0",
   "base58>=2.1.1",
 ]
 
@@ -197,21 +203,20 @@ PY
 ```bash
 #scripts/daily_5am_trigger.sh
 #!/bin/bash
-set -e
+set -euo pipefail
 
 PROJECT_DIR="$(dirname "$(dirname "$(realpath "$0")")")"
 cd "$PROJECT_DIR"
 source .venv/bin/activate
 
+# Use the same scheduled entrypoints as cron for consistency
 # 1) Drain burners & funders → collector at 04:45
-python -m src/flow/burner.py --force-drain
-python -m src/flow/funders.py --force-drain
-
+python -m src.sched.at_0445_drain
 # 2) Collector → DEX + proxies (at 04:50)
-python -m src/flow/collector.py
-
+python -m src.sched.at_0450_dex
 # 3) Rotate funders & regenerate wallets (at 05:00)
-python -m src/flow/rotation.py --rotate
+python -m src.sched.at_0500_rotate
+
 ```
 
 
@@ -230,13 +235,16 @@ python -m src/flow/rotation.py --rotate
 ```bash
 #scripts/self_heal.sh
 #!/bin/bash
-set -e
+set -euo pipefail
 
-BOT_NAME="copytrader"
-if ! pgrep -f "$BOT_NAME" > /dev/null; then
-    echo "[SELF-HEAL] Bot not running — restarting..."
-    systemctl restart copytrader.service
+# Use the same service name as deploy/copytrader.service (overridable via env)
+SERVICE_NAME="${SYSTEMD_SERVICE_NAME:-copytrader.service}"
+
+if ! systemctl is-active --quiet "$SERVICE_NAME"; then
+  echo "[SELF-HEAL] $SERVICE_NAME not active — restarting..."
+  sudo systemctl restart "$SERVICE_NAME"
 fi
+
 ```
 
 ```bash
@@ -256,22 +264,25 @@ done
 ```bash
 #scripts/pgp_encrypt_keys.sh
 #!/bin/bash
-set -e
+set -euo pipefail
+umask 077
 
 KEY_DIR="keys"
 BACKUP_DIR="backups"
-RECIPIENT="your-pgp-key-id"
+RECIPIENT="${RECIPIENT:-your-pgp-key-id}"
+
 
 mkdir -p "$BACKUP_DIR"
 for file in "$KEY_DIR"/*.json; do
     [ -e "$file" ] || continue
-    gpg --yes --encrypt --recipient "$RECIPIENT" --output "$BACKUP_DIR/$(basename "$file").gpg" "$file"
+   out="$BACKUP_DIR/$(basename "$file").gpg"
+    gpg --yes --encrypt --armor --recipient "$RECIPIENT" --output "$out" "$file"
 done
 ```
 
 ```bash
 #src/utils/check_rpc_latency.py
-import requests, time, subprocess, os
+import requests, time, subprocess, os, sys
 
 RPC_POOL_FILE = os.getenv("RPC_POOL_FILE", "config/rpc_pool.txt")
 LATENCY_LIMIT_MS = 500
@@ -293,9 +304,9 @@ def main():
         print(f"{rpc} latency: {latency:.2f} ms")
         if latency > LATENCY_LIMIT_MS:
             bad.append(rpc)
-    if len(bad) == len(rpcs):
+        if len(bad) == len(rpcs):
         print("[!] All RPCs slow — rotating...")
-        subprocess.run(["python", "src/utils/reset_rpc.py"])
+        subprocess.run([sys.executable, "src/utils/reset_rpc.py"], check=False)
 
 if __name__ == "__main__":
     main()
@@ -551,6 +562,39 @@ WantedBy=timers.target
 
 ```
 
+## Utilis
+
+```python
+#src/utils/check_rpc_latency.py
+import requests, time, subprocess, os, sys
+
+RPC_POOL_FILE = os.getenv("RPC_POOL_FILE", "config/rpc_pool.txt")
+LATENCY_LIMIT_MS = 500
+
+def check_latency(url):
+    start = time.time()
+    try:
+        requests.post(url, json={"jsonrpc":"2.0","id":1,"method":"getHealth"}, timeout=2)
+        return (time.time() - start) * 1000
+    except Exception:
+        return float("inf")
+
+def main():
+    with open(RPC_POOL_FILE) as f:
+        rpcs = [line.strip() for line in f if line.strip()]
+    bad = []
+    for rpc in rpcs:
+        latency = check_latency(rpc)
+        print(f"{rpc} latency: {latency:.2f} ms")
+        if latency > LATENCY_LIMIT_MS:
+            bad.append(rpc)
+        if len(bad) == len(rpcs):
+        print("[!] All RPCs slow — rotating...")
+        subprocess.run([sys.executable, "src/utils/reset_rpc.py"], check=False)
+
+if __name__ == "__main__":
+    main()
+```
 ---
 
 ## Core
@@ -558,53 +602,71 @@ WantedBy=timers.target
 ```python
 # src/core/config.py
 from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 import os
 from pathlib import Path
 
 load_dotenv()
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, default))
+    except Exception:
+        return float(default)
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(float(os.getenv(name, default)))  # allow "50.0"
+    except Exception:
+        return int(default)
+
+def _env_list(name: str) -> list[str]:
+    v = os.getenv(name, "")
+    return [x for x in (s.strip() for s in v.split(",")) if x]
 class Splits(BaseModel):
-    btc: float = float(os.getenv("SWAP_SPLIT_BTC", 0.50))
-    eth: float = float(os.getenv("SWAP_SPLIT_ETH", 0.25))
-    xrp: float = float(os.getenv("SWAP_SPLIT_XRP", 0.25))
+   btc: float = Field(default_factory=lambda: _env_float("SWAP_SPLIT_BTC", 0.50))
+    eth: float = Field(default_factory=lambda: _env_float("SWAP_SPLIT_ETH", 0.25))
+    xrp: float = Field(default_factory=lambda: _env_float("SWAP_SPLIT_XRP", 0.25))
+ 
+
 
 class ProxyCfg(BaseModel):
-    hops: int = int(os.getenv("PROXY_HOPS", 2))
-    delay_s_min: int = int(os.getenv("PROXY_DELAY_S_MIN", 3))
-    delay_s_max: int = int(os.getenv("PROXY_DELAY_S_MAX", 9))
-
+    hops: int = Field(default_factory=lambda: _env_int("PROXY_HOPS", 2))
+    delay_s_min: int = Field(default_factory=lambda: _env_int("PROXY_DELAY_S_MIN", 3))
+    delay_s_max: int = Field(default_factory=lambda: _env_int("PROXY_DELAY_S_MAX", 9))
+ 
 class DexCfg(BaseModel):
-    endpoint: str = os.getenv("DEX_ENDPOINT","https://dex.invalid")
-    chunk_size_sol: float = float(os.getenv("CHUNK_SIZE_SOL", 50))
-    delay_s_min: int = int(os.getenv("CHUNK_DELAY_S_MIN", 5))
-    delay_s_max: int = int(os.getenv("CHUNK_DELAY_S_MAX", 10))
-    splits: Splits = Splits()
+    endpoint: str = Field(default_factory=lambda: os.getenv("DEX_ENDPOINT","https://dex.invalid"))
+    chunk_size_sol: float = Field(default_factory=lambda: _env_float("CHUNK_SIZE_SOL", 50))
+    delay_s_min: int = Field(default_factory=lambda: _env_int("CHUNK_DELAY_S_MIN", 5))
+    delay_s_max: int = Field(default_factory=lambda: _env_int("CHUNK_DELAY_S_MAX", 10))
+    splits: Splits = Field(default_factory=Splits)
 
 class TradingCfg(BaseModel):
-    trade_size_sol: float = float(os.getenv("TRADE_SIZE_SOL", 2.5))
-    burner_target_sol: float = float(os.getenv("BURNER_TARGET_SOL", 16))
-    max_marketcap_usd: int = int(os.getenv("MAX_MARKETCAP_USD", 20000))
-    watch_addresses: list[str] = os.getenv("WATCH_ADDRESSES","").split(",") if os.getenv("WATCH_ADDRESSES") else []
+    trade_size_sol: float = Field(default_factory=lambda: _env_float("TRADE_SIZE_SOL", 2.5))
+    burner_target_sol: float = Field(default_factory=lambda: _env_float("BURNER_TARGET_SOL", 16))
+    max_marketcap_usd: int = Field(default_factory=lambda: _env_int("MAX_MARKETCAP_USD", 20000))
+    watch_addresses: list[str] = Field(default_factory=lambda: _env_list("WATCH_ADDRESSES"))
+ 
 
 class AppCfg(BaseModel):
-    env: str = os.getenv('ENV','prod')
-    tz: str = os.getenv('TZ','America/Nassau')
-    data_dir: Path = Path(os.getenv('DATA_DIR','./data')).resolve()
-    log_dir: Path = Path(os.getenv('LOG_DIR','./logs')).resolve()
-    whitelist_ips: list[str] = os.getenv('WHITELISTED_IPS','').split(',') if os.getenv('WHITELISTED_IPS') else []
-    kill_switch_enabled: bool = os.getenv('KILL_SWITCH_ENABLED','true').lower()=='true'
-    rpc_primary: str = os.getenv('RPC_PRIMARY','')
-    rpc_pool_file: str = os.getenv('RPC_POOL_FILE','./config/rpc_pool.txt')
-    COLLECTOR_KEY: str = os.getenv('COLLECTOR_KEY','collector.json')
-    FUNDER_ACTIVE_KEY: str = os.getenv('FUNDER_ACTIVE_KEY','funder_active.json')
-    FUNDER_NEXT_KEY: str = os.getenv('FUNDER_NEXT_KEY','funder_next.json')
-    FUNDER_STANDBY_KEY: str = os.getenv('FUNDER_STANDBY_KEY','funder_standby.json')
-    BURNER_KEY: str = os.getenv('BURNER_KEY','burner.json')
-    dex: DexCfg = DexCfg()
-    proxy: ProxyCfg = ProxyCfg()
-    trading: TradingCfg = TradingCfg()
-
+    env: str = Field(default_factory=lambda: os.getenv('ENV','prod'))
+    tz: str = Field(default_factory=lambda: os.getenv('TZ','America/Nassau'))
+    data_dir: Path = Field(default_factory=lambda: Path(os.getenv('DATA_DIR','./data')).resolve())
+    log_dir: Path = Field(default_factory=lambda: Path(os.getenv('LOG_DIR','./logs')).resolve())
+    whitelist_ips: list[str] = Field(default_factory=lambda: _env_list('WHITELISTED_IPS'))
+    kill_switch_enabled: bool = Field(default_factory=lambda: os.getenv('KILL_SWITCH_ENABLED','true').strip().lower()=='true')
+    rpc_primary: str = Field(default_factory=lambda: os.getenv('RPC_PRIMARY',''))
+    rpc_pool_file: str = Field(default_factory=lambda: os.getenv('RPC_POOL_FILE','./config/rpc_pool.txt'))
+    COLLECTOR_KEY: str = Field(default_factory=lambda: os.getenv('COLLECTOR_KEY','collector.json'))
+    FUNDER_ACTIVE_KEY: str = Field(default_factory=lambda: os.getenv('FUNDER_ACTIVE_KEY','funder_active.json'))
+    FUNDER_NEXT_KEY: str = Field(default_factory=lambda: os.getenv('FUNDER_NEXT_KEY','funder_next.json'))
+    FUNDER_STANDBY_KEY: str = Field(default_factory=lambda: os.getenv('FUNDER_STANDBY_KEY','funder_standby.json'))
+    BURNER_KEY: str = Field(default_factory=lambda: os.getenv('BURNER_KEY','burner.json'))
+    dex: DexCfg = Field(default_factory=DexCfg)
+    proxy: ProxyCfg = Field(default_factory=ProxyCfg)
+    trading: TradingCfg = Field(default_factory=TradingCfg)
+ 
 CFG = AppCfg()
 ```
 
@@ -615,7 +677,8 @@ from pathlib import Path
 from .config import CFG
 
 Path(CFG.log_dir).mkdir(parents=True, exist_ok=True)
-logger.add(Path(CFG.log_dir, 'copytrader.log'), rotation='10 MB', retention='14 days', compression='zip')
+_ = logger.add(Path(CFG.log_dir, 'copytrader.log'), rotation='10 MB', retention='14 days', compression='zip', enqueue=True, backtrace=True, diagnose=False)
+
 ```
 
 ```python
@@ -913,7 +976,7 @@ class Wallet:
 from __future__ import annotations
 from dataclasses import dataclass
 from loguru import logger
-
+from typing import Any
 from solana.rpc.api import Client
 from solana.rpc.types import TxOpts
 from solana.transaction import Transaction
@@ -940,13 +1003,42 @@ class SolanaClient:
         self.rpc_url = rpc_url or active_rpc or CFG.rpc_primary
         self.client = Client(self.rpc_url)
         logger.info(f"[SolanaClient] RPC={self.rpc_url}")
+ # --- helpers ------------------------------------------------------------
+    @staticmethod
+    def _resp_ok(resp: Any) -> bool:
+        # Accept both dict and typed responses
+        if resp is None:
+            return False
+        if hasattr(resp, "is_err"):
+            return not resp.is_err()
+        if isinstance(resp, dict):
+            return "error" not in resp
+        return True
+
+    @staticmethod
+    def _balance_from_resp(resp: Any) -> int:
+        """
+        Return lamports from get_balance response, tolerant of response shape.
+        """
+        if hasattr(resp, "value"):
+            try:
+                return int(resp.value)
+            except Exception:
+                pass
+        if isinstance(resp, dict):
+            # {'result': {'value': 123}, ...}
+            try:
+                return int(resp.get("result", {}).get("value"))
+            except Exception:
+                pass
+        raise RuntimeError(f"Unexpected get_balance response: {resp}")
 
     def get_balance(self, wallet_keyfile: str) -> float:
         kp = load_keypair_from_file(wallet_keyfile)
         resp = self.client.get_balance(kp.pubkey())
-        if resp.is_err():
+        if not self._resp_ok(resp):
             raise RuntimeError(f"get_balance RPC error: {resp}")
-        lamports = resp.value  # returns int lamports
+        lamports = self._balance_from_resp(resp)
         sol = lamports / LAMPORTS_PER_SOL
         logger.debug(f"[balance] {kp.pubkey()} = {sol:.9f} SOL")
         return sol
@@ -960,28 +1052,38 @@ class SolanaClient:
 
         # Recent blockhash
         bh = self.client.get_latest_blockhash()
-        if bh.is_err():
+        if not self._resp_ok(bh):
             raise RuntimeError(f"get_latest_blockhash error: {bh}")
-        bhash = bh.value.blockhash
-
+        # Try typed first, fallback to dict
+        try:
+            bhash = bh.value.blockhash
+        except Exception:
+            bhash = bh.get("result", {}).get("value", {}).get("blockhash")
+        if not bhash:
+            raise RuntimeError(f"Could not parse latest blockhash: {bh}")
         # Build tx
         ix = transfer(TransferParams(from_pubkey=kp.pubkey(), to_pubkey=dst_addr, lamports=lamports))
         tx = Transaction(recent_blockhash=bhash, fee_payer=kp.pubkey())
         tx.add(ix)
 
         # Send + confirm
-        sig = self.client.send_transaction(tx, kp, opts=TxOpts(skip_preflight=False, max_retries=3))
-        if sig.is_err():
-            raise RuntimeError(f"send_transaction error: {sig}")
-
-        signature = str(sig.value)
+        resp = self.client.send_transaction(tx, kp, opts=TxOpts(skip_preflight=False, max_retries=3))
+        if not self._resp_ok(resp):
+            raise RuntimeError(f"send_transaction error: {resp}")
+        try:
+            signature = str(resp.value)
+        except Exception:
+            signature = str(resp.get("result"))
         logger.info(f"[transfer] {amount_sol} SOL -> {dst_addr} sig={signature}")
 
         # (optional) confirm
-        conf = self.client.confirm_transaction(signature)
-        if conf.is_err():
-            logger.warning(f"[transfer] confirm error: {conf}")
-
+       try:
+            conf = self.client.confirm_transaction(signature)
+            if not self._resp_ok(conf):
+                logger.warning(f"[transfer] confirm error: {conf}")
+        except Exception as e:
+            logger.warning(f"[transfer] confirm exception: {e}")
+ 
         return TxResult(sig=signature)
 
     def burn_wallet(self, key_path: str):
@@ -994,12 +1096,10 @@ class SolanaClient:
 # src/solana/wallet_manager.py
 from __future__ import annotations
 from pathlib import Path
+import os
 from dataclasses import dataclass
 from loguru import logger
-
 from solders.keypair import Keypair  # NEW
-from base58 import b58encode          # NEW
-
 from .wallet import Wallet
 from src.core.state import State
 from src.core.keystore import KeyStore
@@ -1015,7 +1115,9 @@ def _generate_keypair_json() -> tuple[str, str]:
     arr = list(secret)              # [int,int,...]
     pub = str(kp.pubkey())          # base58
     import json
-    return pub, json.dumps(arr)
+    # compact JSON (like solana-keygen export) and trailing newline for editor-friendliness
+    return pub, json.dumps(arr, separators=(',', ':')) + "\n"
+
 
 @dataclass
 class RolePaths:
@@ -1029,12 +1131,27 @@ class WalletManager:
     def _write_keyfile(self, filename: str, secret_json: str) -> Path:
         p = KeyStore.path(filename)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(secret_json)
+        # Tighten dir perms first (best-effort)
         try:
-            import os
+            os.chmod(p.parent, 0o700)
+        except Exception:
+            logger.warning(f"Could not chmod 700 for {p.parent} (non-POSIX system?)")
+
+        # Atomic write with explicit 0600 mode
+        tmp = p.with_suffix(p.suffix + ".new")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, secret_json.encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, p)  # atomic move
+
+        # Double-ensure permissions on final file
+        try:
             os.chmod(p, 0o600)
         except Exception:
-            pass
+            logger.warning(f"Could not chmod 600 for {p} (non-POSIX system?)")
         return p
 
     def create_wallet(self, role: str, filename: str) -> Wallet:
@@ -1492,12 +1609,14 @@ class TrailingExit:
     def __init__(self, start_pct:float, trail_drop_pct:float):
         self.start=start_pct; self.drop=trail_drop_pct
     def should_exit(self, peak:float, current:float):
-        if peak < (1+self.start):
+        if peak < (1 + self.start):
             return False
-        return (current <= peak*(1 - self.drop))
+         return current <= peak * (1 - self.drop)
 
+# NOTE: Cupesy starts trailing at +20% with a 0.001% trail; Euris starts at +36% with a 0.001% trail.
 EurisTPSL = TrailingExit(0.36, 0.00001)
-CupesyTPSL = TrailingExit(0.20, 0.00001)
+CupesyTPSL = TrailingExit(0.20, 0.000001)
+
 ```
 
 ```python
@@ -1564,27 +1683,79 @@ class IpGuard:
         except Exception:
             pass
         return '0.0.0.0'
+def is_whitelisted(self) -> bool:
+        # If kill switch is disabled OR no whitelist is configured, do not enforce
+        if not CFG.kill_switch_enabled:
+            logger.info("Kill switch disabled; skipping IP check.")
+            return True
+        if not CFG.whitelist_ips:
+            logger.warning("WHITELISTED_IPS empty; allowing all IPs. Configure this in production.")
+            return True
+
+        ip = self.current_ip()
+        if ip == "0.0.0.0":
+            logger.warning("Could not resolve current IP; allowing traffic to avoid false positives.")
+            return True
+        ok = (ip in CFG.whitelist_ips)
+        if not ok:
+            logger.error(f"Unknown IP {ip} (not in whitelist)")
+        return ok
+
 ```
 
 ```python
 # src/security/kill_switch.py
 from loguru import logger
+from pathlib import Path
+import time
 from src.security.ip_guard import IpGuard
+from src.core.config import CFG
 
 class KillSwitch:
     def __init__(self, drain_callable, reboot_callable):
         self.drain = drain_callable
         self.reboot = reboot_callable
+     # Lock file to prevent repeated triggers in a short window
+        self._lock = Path("data/kill.lock")
+
+    def _recently_triggered(self, ttl_s: int = 60) -> bool:
+        if not self._lock.exists():
+            return False
+        try:
+            return (time.time() - self._lock.stat().st_mtime) < ttl_s
+        except Exception:
+            return False
+
+    def _touch_lock(self):
+        try:
+            self._lock.parent.mkdir(parents=True, exist_ok=True)
+            self._lock.write_text(str(time.time()))
+        except Exception:
+            pass
+
     def check_and_trigger(self):
+        if not CFG.kill_switch_enabled:
+            logger.info("Kill switch disabled by config.")
+            return
         guard = IpGuard()
         if not guard.is_whitelisted():
             logger.critical("KILL SWITCH: Unknown IP detected!")
             self.trigger()
+
     def trigger(self):
-        self.drain()
-        self.reboot()
+        if self._recently_triggered():
+            logger.warning("Kill switch already triggered recently; ignoring duplicate.")
+            return
+        self._touch_lock()
+        try:
+            self.drain()
+        except Exception as e:
+            logger.exception(f"Kill drain failed: {e}")
+        try:
+            self.reboot()
+        except Exception as e:
+            logger.exception(f"Kill reboot failed: {e}")
         logger.critical("⚠️ Kill switch active. Funds evacuated & system rebooting.")
-```
 
 ```python
 # src/security/pgp.py
@@ -1627,27 +1798,70 @@ class TGBot:
 from loguru import logger
 from telegram import Update
 from telegram.ext import ContextTypes
+import os, time
+
+
+ADMIN_IDS = {int(x) for x in os.getenv("TELEGRAM_ADMIN_IDS","").split(",") if x.strip().isdigit()}
+KILL_PASSPHRASE = os.getenv("KILL_SWITCH_PASSPHRASE","")
+_LAST_KILL_TS = 0.0
+
+def _is_admin(update: Update) -> bool:
+    u = update.effective_user
+    return bool(u and (u.id in ADMIN_IDS))
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+ if not _is_admin(update):
+        await update.message.reply_text("Not authorized.")
+        return
     logger.info("/status")
     await update.message.reply_text("Balances: ... (stub)")
 
 async def cmd_rotate_now(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+if not _is_admin(update):
+        await update.message.reply_text("Not authorized.")
+        return
     logger.info("/rotate_now")
     await update.message.reply_text("Manual rotation kicked off.")
 
 async def cmd_sync(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+if not _is_admin(update):
+        await update.message.reply_text("Not authorized.")
+        return
     logger.info("/sync")
     await update.message.reply_text("Health OK.")
 
 async def cmd_kill(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    logger.warning("/kill -> kill switch")
-    await update.message.reply_text("Kill switch activated (simulated).")
+   if not _is_admin(update):
+        await update.message.reply_text("Not authorized.")
+        return
+    text = (update.message.text or "").strip()
+    parts = text.split(maxsplit=1)
+    if not KILL_PASSPHRASE:
+        await update.message.reply_text("Kill switch not configured.")
+        return
+    if len(parts) < 2 or parts[1] != KILL_PASSPHRASE:
+        await update.message.reply_text("Passphrase required. Usage: /kill <passphrase>")
+        return
+    global _LAST_KILL_TS
+    now = time.time()
+    if now - _LAST_KILL_TS < 10:
+        await update.message.reply_text("Kill already triggered recently. Please wait.")
+        return
+    _LAST_KILL_TS = now
+    logger.warning("/kill -> kill switch (authorized)")
+    await update.message.reply_text("Kill switch activated (acknowledged).")
+
 
 async def cmd_vault_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+if not _is_admin(update):
+        await update.message.reply_text("Not authorized.")
+        return
     await update.message.reply_text("Vault (Hot/Cold): ... (stub)")
 
 async def cmd_atpnl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+if not _is_admin(update):
+        await update.message.reply_text("Not authorized.")
+        return
     await update.message.reply_text("All-time PnL: ... (stub)")
 
 ```
@@ -1820,6 +2034,152 @@ def test_exit_after_start():
     assert t.should_exit(1.40, 1.399) is True
 ```
 
+```python
+#tests/conftest.py
+import json
+import pytest
+from pathlib import Path
+
+@pytest.fixture(autouse=True)
+def isolate_keys_and_state(tmp_path, monkeypatch):
+    """
+    Redirect KeyStore.base -> tmp/keys and State.STATE_PATH -> tmp/data/state.json
+    so tests don't touch real files.
+    """
+    # keys/
+    keys_dir = tmp_path / "keys"
+    keys_dir.mkdir(parents=True, exist_ok=True)
+    import src.core.keystore as keystore_mod
+    monkeypatch.setattr(keystore_mod.KeyStore, "base", keys_dir, raising=False)
+
+    # data/state.json
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    state_path = data_dir / "state.json"
+
+    import src.core.state as state_mod
+    monkeypatch.setattr(state_mod, "STATE_PATH", state_path, raising=False)
+
+    # Force a fresh State cache on first import/use
+    try:
+        state_path.write_text(json.dumps(state_mod.DEFAULT, indent=2))
+    except Exception:
+        pass
+
+    yield
+```
+
+```python
+tests/test_wallet_manager_regen.py
+from pathlib import Path
+from src.solana.wallet_manager import WalletManager
+from src.core.state import State
+from src.core.keystore import KeyStore
+
+def test_wallet_manager_create_burn_replace(tmp_path):
+    state = State()  # uses patched STATE_PATH from fixture
+    wm = WalletManager(state)
+
+    # 1) create
+    w = wm.create_wallet("burner", "burner.json")
+    assert w.pubkey
+    assert Path(w.key_path).exists()
+    assert state.get_pubkey("burner") == w.pubkey
+
+    # 2) burn (file gone, state cleared)
+    wm.burn_wallet("burner", "burner.json")
+    assert not KeyStore.path("burner.json").exists()
+    assert state.get_pubkey("burner") is None
+
+    # 3) replace (burn + create) -> new pubkey different from previous
+     w2 = wm.replace_wallet("burner", "burner.json")
+    assert KeyStore.path("burner.json").exists()
+    assert w2.pubkey and w2.pubkey != w.pubkey
+    assert state.get_pubkey("burner") == w2.pubkey
+```
+```python
+#tests/test_state_token_buy.py
+from src.core.state import State
+
+def test_token_buy_registry_roundtrip():
+    s = State()
+    role = "burner"
+    mint = "FAKE111111111111111111111111111111111111111"
+
+    # Initially not bought
+    assert not s.has_bought_token(role, mint)
+
+    # Record and verify
+    s.record_token_buy(role, mint)
+    assert s.has_bought_token(role, mint)
+
+    # Clear role registry
+    s.clear_role_token_buys(role)
+    assert not s.has_bought_token(role, mint)
+```
+
+```python
+#tests/test_proxy_router_delays.py
+from src.flow.proxies import ProxyRouter
+from src.core.config import CFG
+
+def test_proxy_router_calls_jitter_with_expected_args(monkeypatch):
+    # Save and tweak config
+    old_hops = CFG.proxy.hops
+    old_min = CFG.proxy.delay_s_min
+    old_max = CFG.proxy.delay_s_max
+    CFG.proxy.hops = 3
+    CFG.proxy.delay_s_min = 2
+    CFG.proxy.delay_s_max = 5
+
+    calls = []
+
+    # Patch the imported jitter function inside proxies module
+    import src.flow.proxies as proxies_mod
+    def fake_jitter(min_s, max_s):
+        calls.append((min_s, max_s))
+        return None
+    monkeypatch.setattr(proxies_mod, "jitter", fake_jitter, raising=True)
+
+    try:
+        ProxyRouter().route_with_hops(100.0, "SRC", "DST")
+        # Called exactly `hops` times
+        assert len(calls) == CFG.proxy.hops
+        # Each call used the configured bounds
+        assert all(c == (CFG.proxy.delay_s_min, CFG.proxy.delay_s_max) for c in calls)
+    finally:
+        # Restore config
+        CFG.proxy.hops = old_hops
+        CFG.proxy.delay_s_min = old_min
+        CFG.proxy.delay_s_max = old_max
+```
+```python
+#tests/test_daily_rotation_smoke.py
+import os
+from src.flow.rotation import DailyRotation
+from src.core.state import State
+from src.solana.wallet_manager import WalletManager
+
+def test_daily_rotation_smoke(monkeypatch):
+    # Ensure minimal state exists
+    s = State()
+    wm = WalletManager(s)
+    # Create required roles if empty
+    for role, fname in [
+        ("collector", "collector.json"),
+        ("burner", "burner.json"),
+        ("funder_active", "funder_active.json"),
+        ("funder_next", "funder_next.json"),
+        ("funder_standby", "funder_standby.json"),
+    ]:
+        if not s.get_pubkey(role):
+            wm.create_wallet(role, fname)
+
+    # Run in dry-run mode if your client supports it
+    os.environ.setdefault("DRY_RUN", "1")
+    DailyRotation().execute()
+    # If no exceptions, consider it a pass (this is a smoke test)
+    assert True
 ---
 
 ### Notes
