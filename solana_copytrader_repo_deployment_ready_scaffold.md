@@ -472,32 +472,17 @@ WantedBy=timers.target
 ```
 
 ```json
-# data/state.json
+#data/state.json
 {
   "active_rpc": "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
   "wallets": {
-    "burner": {
-      "pubkey": "BURNER_PUBLIC_KEY",
-      "keyfile": "keys/burner.json"
-    },
-    "collector": {
-      "pubkey": "COLLECTOR_PUBLIC_KEY",
-      "keyfile": "keys/collector.json"
-    },
-    "funder_active": {
-      "pubkey": "FUNDER_ACTIVE_PUBLIC_KEY",
-      "keyfile": "keys/funder_active.json"
-    },
-    "funder_next": {
-      "pubkey": "FUNDER_NEXT_PUBLIC_KEY",
-      "keyfile": "keys/funder_next.json"
-    },
-    "funder_standby": {
-      "pubkey": "FUNDER_STANDBY_PUBLIC_KEY",
-      "keyfile": "keys/funder_standby.json"
-    }
+    "burner":           { "pubkey": "", "keyfile": "keys/burner.json" },
+    "collector":        { "pubkey": "", "keyfile": "keys/collector.json" },
+    "funder_active":    { "pubkey": "", "keyfile": "keys/funder_active.json" },
+    "funder_next":      { "pubkey": "", "keyfile": "keys/funder_next.json" },
+    "funder_standby":   { "pubkey": "", "keyfile": "keys/funder_standby.json" }
   },
-  "last_rotation": "2025-08-09T05:00:00Z",
+  "last_rotation": null,
   "last_kill_switch": null
 }
 
@@ -1289,34 +1274,35 @@ from src.solana.client import SolanaClient
 from src.solana.wallet_manager import WalletManager
 from src.dex.client import SwapAlloc
 
+
 class CollectorFlow:
     def __init__(self, sol:SolanaClient, dex:DexClient, wm:WalletManager, collector_keyfile:str):
         self.sol=sol; self.dex=dex; self.wm=wm; self.collector_keyfile=collector_keyfile
 
     def run_0450(self):
-    bal = self.sol.get_balance(self.collector_keyfile)
-    remaining = bal
-
-    # Use current 50/25/25 split
-    alloc = SwapAlloc(CFG.dex.splits.btc, CFG.dex.splits.eth, CFG.dex.splits.xrp)
-
-    # Swap in chunks with jitter
-    while remaining > 0:
-        chunk = min(CFG.dex.chunk_size_sol, remaining)
-        self.dex.swap_sol_to_alloc(self.collector_keyfile, chunk, alloc)
-        remaining -= chunk
-        jitter(CFG.dex.delay_s_min, CFG.dex.delay_s_max)
-
-    # Regenerate collector
-    logger.info("Collector emptied to DEX; burn & recreate")
-    self.wm.replace_wallet("collector", getattr(CFG, "COLLECTOR_KEY", "collector.json"))
-
-    # 🔥 NEW: burn & regenerate proxies (one-time-use)
-    p1 = getattr(CFG, "PROXY1_KEY", "proxy1.json")
-    p2 = getattr(CFG, "PROXY2_KEY", "proxy2.json")
-    self.wm.replace_wallet("proxy1", p1)
-    self.wm.replace_wallet("proxy2", p2)
-    logger.info("Proxy wallets burned & regenerated")
+	    bal = self.sol.get_balance(self.collector_keyfile)
+	    remaining = bal
+	
+	    # Use current 50/25/25 split
+	    alloc = SwapAlloc(CFG.dex.splits.btc, CFG.dex.splits.eth, CFG.dex.splits.xrp)
+	
+	    # Swap in chunks with jitter
+	    while remaining > 0:
+	        chunk = min(CFG.dex.chunk_size_sol, remaining)
+	        self.dex.swap_sol_to_alloc(self.collector_keyfile, chunk, alloc)
+	        remaining -= chunk
+	        jitter(CFG.dex.delay_s_min, CFG.dex.delay_s_max)
+	
+	    # Regenerate collector
+	    logger.info("Collector emptied to DEX; burn & recreate")
+	    self.wm.replace_wallet("collector", getattr(CFG, "COLLECTOR_KEY", "collector.json"))
+	
+	    # 🔥 NEW: burn & regenerate proxies (one-time-use)
+	    p1 = getattr(CFG, "PROXY1_KEY", "proxy1.json")
+	    p2 = getattr(CFG, "PROXY2_KEY", "proxy2.json")
+	    self.wm.replace_wallet("proxy1", p1)
+	    self.wm.replace_wallet("proxy2", p2)
+	    logger.info("Proxy wallets burned & regenerated")
 
 ```
 
@@ -1331,6 +1317,7 @@ from src.solana.keypair_io import load_keypair_from_file
 from src.core.state import State
 from src.core.keystore import KeyStore
 from src.core.config import CFG
+from src.flow.rotation import DailyRotation
 
 class FunderRotation:
     def __init__(self, sol:SolanaClient, wm:WalletManager, active_kf:str, next_kf:str, standby_kf:str, collector_addr:str):
@@ -1694,7 +1681,7 @@ class KillSwitch:
     def __init__(self, drain_callable, reboot_callable):
         self.drain = drain_callable
         self.reboot = reboot_callable
-     # Lock file to prevent repeated triggers in a short window
+        # Lock file to prevent repeated triggers in a short window
         self._lock = Path("data/kill.lock")
 
     def _recently_triggered(self, ttl_s: int = 60) -> bool:
@@ -1792,7 +1779,6 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update):
         await update.message.reply_text("Not authorized.")
         return
-    ...
     logger.info("/status")
     await update.message.reply_text("Balances: ... (stub)")
 
@@ -1836,13 +1822,13 @@ async def cmd_vault_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update):
         await update.message.reply_text("Not authorized.")
         return
-    await update.message.reply_text("Vault (Hot/Cold): ... (stub)")
+    await update.message.reply_text("Vault (Hot/Cold): {summary_text}")
 
 async def cmd_atpnl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update):
         await update.message.reply_text("Not authorized.")
         return
-    await update.message.reply_text("All-time PnL: ... (stub)")
+    await update.message.reply_text("All-time PnL: {pnl.summary()['all_time']:.2f} USD")
 
 ```
 
@@ -2071,7 +2057,7 @@ def test_wallet_manager_create_burn_replace(tmp_path):
     assert not KeyStore.path("burner.json").exists()
     assert state.get_pubkey("burner") is None
 
-       # 3) replace (burn + create) -> new pubkey different from previous
+    # 3) replace (burn + create) -> new pubkey different from previous
     w2 = wm.replace_wallet("burner", "burner.json")
     assert KeyStore.path("burner.json").exists()
     assert w2.pubkey and w2.pubkey != w.pubkey
