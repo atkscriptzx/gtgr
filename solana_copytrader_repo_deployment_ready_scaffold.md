@@ -569,12 +569,13 @@ WantedBy=timers.target
 
 ```python
 #src/utils/check_rpc_latency.py
+# src/utils/check_rpc_latency.py
 import os, sys, time, subprocess, requests
 
 RPC_POOL_FILE = os.getenv("RPC_POOL_FILE", "config/rpc_pool.txt")
 LATENCY_LIMIT_MS = int(os.getenv("RPC_LATENCY_MS_THRESHOLD", "500"))
 
-def check_latency(url):
+def check_latency(url: str) -> float:
     start = time.time()
     try:
         requests.post(url, json={"jsonrpc":"2.0","id":1,"method":"getHealth"}, timeout=2)
@@ -584,20 +585,20 @@ def check_latency(url):
 
 def main():
     with open(RPC_POOL_FILE) as f:
-        rpcs = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+        rpcs = [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith("#")]
     bad = []
     for rpc in rpcs:
         latency = check_latency(rpc)
         print(f"{rpc} latency: {latency:.2f} ms")
         if latency > LATENCY_LIMIT_MS:
             bad.append(rpc)
-
     if len(bad) == len(rpcs):
         print("[!] All RPCs slow — rotating...")
         subprocess.run([sys.executable, "src/utils/reset_rpc.py"], check=False)
 
 if __name__ == "__main__":
     main()
+
 
 ```
 ```python
@@ -984,6 +985,7 @@ from solana.system_program import TransferParams, transfer
 from src.solana.keypair_io import load_keypair_from_file
 from src.core.config import CFG
 from src.core.state import State
+from solders.pubkey import Pubkey
 
 LAMPORTS_PER_SOL = 1_000_000_000
 
@@ -1060,6 +1062,10 @@ class SolanaClient:
             bhash = bh.get("result", {}).get("value", {}).get("blockhash")
         if not bhash:
             raise RuntimeError(f"Could not parse latest blockhash: {bh}")
+
+        # ✅ Convert string -> Pubkey
+        to_pub = Pubkey.from_string(dst_addr)
+
         # Build tx
         ix = transfer(TransferParams(from_pubkey=kp.pubkey(), to_pubkey=dst_addr, lamports=lamports))
         tx = Transaction(recent_blockhash=bhash, fee_payer=kp.pubkey())
@@ -1324,6 +1330,7 @@ import json
 from src.solana.keypair_io import load_keypair_from_file
 from src.core.state import State
 from src.core.keystore import KeyStore
+from src.core.config import CFG
 
 class FunderRotation:
     def __init__(self, sol:SolanaClient, wm:WalletManager, active_kf:str, next_kf:str, standby_kf:str, collector_addr:str):
@@ -1332,14 +1339,18 @@ class FunderRotation:
         self.collector=collector_addr
 
     def ensure_active_has_5(self):
-        try:
-            bal = self.sol.get_balance(self.active_kf)
-            need = max(0.0, 5.0 - bal)
-            if need > 0:
-                logger.info(f"Topping up active funder by {need:.4f} SOL from collector")
-                self.sol.transfer(self.collector, self._pubkey_of(self.active_kf), need)
-        except Exception as e:
-            logger.exception(f"ensure_active_has_5 failed: {e}")
+    """Top up ACTIVE funder to 5 SOL from collector as needed."""
+    try:
+        bal = self.sol.get_balance(self.active_kf)
+        need = max(0.0, 5.0 - bal)
+        if need > 0:
+            self.sol.transfer(
+                str(KeyStore.path(CFG.COLLECTOR_KEY)),  # source = collector keyfile
+                self._pubkey_of(self.active_kf),        # dest   = active funder pubkey
+                need,
+            )
+    except Exception as e:
+        logger.exception(f"ensure_active_has_5 failed: {e}")
 
     def rotate(self):
         logger.info("Rotating funders: active->(burn if empty), next->active, standby->next, new standby")
