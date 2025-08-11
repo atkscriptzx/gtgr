@@ -508,20 +508,41 @@ WantedBy=timers.target
 ## Core and Utils
 
 ```python
-#src/utils/check_rpc_latency.py
 # src/utils/check_rpc_latency.py
-import os, sys, time, subprocess, requests
+import os, sys, time, subprocess, requests, random, json
 
 RPC_POOL_FILE = os.getenv("RPC_POOL_FILE", "config/rpc_pool.txt")
+STATE_FILE = "data/state.json"
 LATENCY_LIMIT_MS = int(os.getenv("RPC_LATENCY_MS_THRESHOLD", "500"))
 
 def check_latency(url: str) -> float:
     start = time.time()
     try:
-        requests.post(url, json={"jsonrpc":"2.0","id":1,"method":"getHealth"}, timeout=2)
+        requests.post(url, json={"jsonrpc": "2.0", "id": 1, "method": "getHealth"}, timeout=2)
         return (time.time() - start) * 1000
     except Exception:
         return float("inf")
+
+def reset_rpc():
+    """Choose a random RPC from the pool and save it to state.json."""
+    with open(RPC_POOL_FILE) as f:
+        rpcs = [line.strip() for line in f if line.strip()]
+    if not rpcs:
+        print("[RPC RESET] No RPC endpoints found in pool file.")
+        return
+    new_rpc = random.choice(rpcs)
+    print(f"[RPC RESET] Switching to {new_rpc}")
+
+    state = {}
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE) as f:
+                state = json.load(f)
+        except Exception:
+            pass
+    state["active_rpc"] = new_rpc
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
 
 def main():
     with open(RPC_POOL_FILE) as f:
@@ -534,7 +555,7 @@ def main():
             bad.append(rpc)
     if len(bad) == len(rpcs):
         print("[!] All RPCs slow — rotating...")
-        subprocess.run([sys.executable, "src/utils/reset_rpc.py"], check=False)
+        reset_rpc()
 
 if __name__ == "__main__":
     main()
@@ -1029,11 +1050,8 @@ class SolanaClient:
         if not bhash:
             raise RuntimeError(f"Could not parse latest blockhash: {bh}")
 
-        # ✅ Convert string -> Pubkey
         to_pub = Pubkey.from_string(dst_addr)
-
-        # Build tx
-        ix = transfer(TransferParams(from_pubkey=kp.pubkey(), to_pubkey=dst_addr, lamports=lamports))
+        ix = transfer(TransferParams(from_pubkey=kp.pubkey(), to_pubkey=to_pub, lamports=lamports))
         tx = Transaction(recent_blockhash=bhash, fee_payer=kp.pubkey())
         tx.add(ix)
 
@@ -1278,14 +1296,28 @@ class CollectorFlow:
     def run_0450(self):
     bal = self.sol.get_balance(self.collector_keyfile)
     remaining = bal
+
+    # Use current 50/25/25 split
     alloc = SwapAlloc(CFG.dex.splits.btc, CFG.dex.splits.eth, CFG.dex.splits.xrp)
+
+    # Swap in chunks with jitter
     while remaining > 0:
         chunk = min(CFG.dex.chunk_size_sol, remaining)
         self.dex.swap_sol_to_alloc(self.collector_keyfile, chunk, alloc)
         remaining -= chunk
         jitter(CFG.dex.delay_s_min, CFG.dex.delay_s_max)
+
+    # Regenerate collector
     logger.info("Collector emptied to DEX; burn & recreate")
-    self.wm.replace_wallet("collector", CFG.COLLECTOR_KEY if hasattr(CFG, 'COLLECTOR_KEY') else 'collector.json')
+    self.wm.replace_wallet("collector", getattr(CFG, "COLLECTOR_KEY", "collector.json"))
+
+    # 🔥 NEW: burn & regenerate proxies (one-time-use)
+    p1 = getattr(CFG, "PROXY1_KEY", "proxy1.json")
+    p2 = getattr(CFG, "PROXY2_KEY", "proxy2.json")
+    self.wm.replace_wallet("proxy1", p1)
+    self.wm.replace_wallet("proxy2", p2)
+    logger.info("Proxy wallets burned & regenerated")
+
 ```
 
 ```python
@@ -1353,6 +1385,9 @@ class FunderRotation:
     def _pubkey_of(self, keyfile:str) -> str:
         kp = load_keypair_from_file(KeyStore.path(keyfile))
         return str(kp.pubkey())
+
+if __name__ == "__main__":
+    DailyRotation().execute()
 
 ```
 
