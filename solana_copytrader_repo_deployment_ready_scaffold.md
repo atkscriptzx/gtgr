@@ -472,7 +472,7 @@ After=network.target
 
 [Service]
 Type=simple
-User=linuxxuser
+User=linuxuser
 WorkingDirectory=/home/linuxuser/solana-copytrader
 ExecStart=/home/linuxuser/solana-copytrader/.venv/bin/python -m src.main
 Restart=always
