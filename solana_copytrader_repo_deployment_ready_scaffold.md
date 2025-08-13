@@ -513,22 +513,22 @@ WantedBy=timers.target
 ```json
 #data/state.json
 {
-  "active_rpc": "[https://empty-methodical-asphalt.solana-mainnet.quiknode.pro/121047ee49945da6b0adba7cd07826e4802812c3/]
- "wallets": {
+  "active_rpc": "https://empty-methodical-asphalt.solana-mainnet.quiknode.pro/121047ee49945da6b0adba7cd07826e4802812c3/",
+  "wallets": {
     "burner":         { "pubkey": "", "keyfile": "keys/burner.json" },
     "collector":      { "pubkey": "", "keyfile": "keys/collector.json" },
     "funder_active":  { "pubkey": "", "keyfile": "keys/funder_active.json" },
     "funder_next":    { "pubkey": "", "keyfile": "keys/funder_next.json" },
     "funder_standby": { "pubkey": "", "keyfile": "keys/funder_standby.json" },
     "proxy3":         { "pubkey": "", "keyfile": "keys/proxy3.json" },
-    "proxy4":         { "pubkey": "", "keyfile": "keys/proxy4.json" }
-	"proxy5":         { "pubkey": "", "keyfile": "keys/proxy5.json" },
+    "proxy4":         { "pubkey": "", "keyfile": "keys/proxy4.json" },
+    "proxy5":         { "pubkey": "", "keyfile": "keys/proxy5.json" },
     "proxy6":         { "pubkey": "", "keyfile": "keys/proxy6.json" }
-
   },
   "last_rotation": null,
   "last_kill_switch": null
 }
+
 
 ```
 
@@ -685,8 +685,9 @@ class AppCfg(BaseModel):
     PROXY4_KEY: str = Field(default_factory=lambda: os.getenv('PROXY4_KEY', 'proxy4.json'))
     PROXY5_KEY: str = Field(default_factory=lambda: os.getenv('PROXY5_KEY', 'proxy5.json'))
     PROXY6_KEY: str = Field(default_factory=lambda: os.getenv('PROXY6_KEY', 'proxy6.json'))
-   	HOLD_HOT_KEY: str  = Field(default_factory=lambda: os.getenv('HOLD_HOT_KEY',  'hold_hot.json'))
-	HOLD_COLD_KEY: str = Field(default_factory=lambda: os.getenv('HOLD_COLD_KEY', 'hold_cold.json'))
+    HOLD_HOT_KEY: str = Field(default_factory=lambda: os.getenv('HOLD_HOT_KEY', 'hold_hot.json'))
+    HOLD_COLD_KEY: str = Field(default_factory=lambda: os.getenv('HOLD_COLD_KEY', 'hold_cold.json'))
+
 
 
     dex: DexCfg = Field(default_factory=DexCfg)
@@ -1553,26 +1554,26 @@ class CollectorFlow:
 
 	def route_profits_to_vaults(sol_amount_for_a: float, sol_amount_for_b: float):
 	    # Route 1 → Vault A via Proxy3/Proxy4
-	    transfer_via_proxies(
-	        hops=[CFG.PROXY3_KEY, CFG.PROXY4_KEY],
-	        src_key=CFG.COLLECTOR_KEY,
-	        dst_key=CFG.HOLD_HOT_KEY,
-	        amount_sol=sol_amount_for_a,
-	        delay_s_min=CFG.proxy.delay_s_min,
-	        delay_s_max=CFG.proxy.delay_s_max,
-	        burn_and_regen_on_use=True,
-	    )
-	
-	    # Route 2 → Vault B via Proxy5/Proxy6
-	    transfer_via_proxies(
-	        hops=[CFG.PROXY5_KEY, CFG.PROXY6_KEY],
-	        src_key=CFG.COLLECTOR_KEY,
-	        dst_key=CFG.HOLD_COLD_KEY,
-	        amount_sol=sol_amount_for_b,
-	        delay_s_min=CFG.proxy.delay_s_min,
-	        delay_s_max=CFG.proxy.delay_s_max,
-	        burn_and_regen_on_use=True,
-	    )
+    transfer_via_proxies(
+        hops=[CFG.PROXY3_KEY, CFG.PROXY4_KEY],
+        src_key=CFG.COLLECTOR_KEY,
+        dst_key=CFG.HOLD_HOT_KEY,
+        amount_sol=sol_amount_for_a,
+        delay_s_min=CFG.proxy.delay_s_min,
+        delay_s_max=CFG.proxy.delay_s_max,
+        burn_and_regen_on_use=True,
+    )
+
+    # Route 2 → Vault B via Proxy5/Proxy6
+    transfer_via_proxies(
+        hops=[CFG.PROXY5_KEY, CFG.PROXY6_KEY],
+        src_key=CFG.COLLECTOR_KEY,
+        dst_key=CFG.HOLD_COLD_KEY,
+        amount_sol=sol_amount_for_b,
+        delay_s_min=CFG.proxy.delay_s_min,
+        delay_s_max=CFG.proxy.delay_s_max,
+        burn_and_regen_on_use=True,
+    )
 
 ```
 
@@ -1661,17 +1662,53 @@ class FunderRotation:
 
 ```python
 # src/flow/proxies.py
+from time import sleep
 from loguru import logger
-from src.core.config import CFG
-from src.core.timeutils import jitter
+from src.core.keystore import KeyStore
+from src.solana.client import SolanaClient
+from src.solana.wallet_manager import WalletManager
 
-class ProxyRouter:
-    def route_with_hops(self, amount_units:float, src:str, dst:str):
-        hops = CFG.proxy.hops
-        for i in range(hops):
-            logger.info(f"Proxy hop {i+1}/{hops}: moving {amount_units} units")
-            jitter(CFG.proxy.delay_s_min, CFG.proxy.delay_s_max)
-        logger.info(f"Delivered to {dst}; burn proxies (stub)")
+def _role_from_filename(cfg_key: str) -> str:
+    name = cfg_key.lower()
+    for r in ["proxy1","proxy2","proxy3","proxy4","proxy5","proxy6","collector","funder_active","funder_next","funder_standby","burner","hold_hot","hold_cold"]:
+        if r in name:
+            return r
+    return "proxy"
+
+def transfer_via_proxies(
+    hops: list[str],
+    src_key: str,
+    dst_key: str,
+    amount_sol: float,
+    delay_s_min: float = 0,
+    delay_s_max: float = 0,
+    burn_and_regen_on_use: bool = True,
+):
+    wm = WalletManager()
+    sol = SolanaClient()
+
+    seq = [src_key] + list(hops) + [dst_key]
+    kfs = [str(KeyStore.path(k)) for k in seq]
+
+    for i in range(len(kfs) - 1):
+        src_kf = kfs[i]
+        dst_kf = kfs[i + 1]
+        dst_role = _role_from_filename(seq[i + 1])
+        dst_pub = wm.state.get_pubkey(dst_role) or wm.create_wallet(dst_role, dst_kf.split("/")[-1]).pubkey
+
+        logger.info(f"[proxy] hop {i+1}/{len(kfs)-1}: {src_kf} -> {dst_pub} amount={amount_sol} SOL")
+        sol.transfer(src_keyfile=src_kf, dst_addr=dst_pub, amount_sol=amount_sol, priority_micro_lamports=0, skip_preflight=True)
+
+        if burn_and_regen_on_use and 0 < i < len(kfs) - 1:
+            used_cfg_fname = seq[i]    # the hop we just delivered to
+            used_role = _role_from_filename(used_cfg_fname)
+            logger.info(f"[proxy] burn+regen {used_role}")
+            wm.replace_wallet(used_role, used_cfg_fname)
+
+        if delay_s_min or delay_s_max:
+            import random
+            sleep(random.uniform(delay_s_min, delay_s_max))
+
 ```
 
 ```python
@@ -1761,7 +1798,6 @@ class DailyRotation:
     for i in range(len(kfs) - 1):
         src_kf = kfs[i]
         dst_kf = kfs[i + 1]
-        dst_pub = wm._State__class__ if False else None  # placeholder to show we don't introspect; use:
         dst_pub = wm.state.get_pubkey(_role_from_filename(dst_kf)) or wm.create_wallet(_role_from_filename(dst_kf), dst_kf.split("/")[-1]).pubkey  # ensure pubkey exists
 
         logger.info(f"[proxy] hop {i+1}/{len(kfs)-1}: {src_kf} -> {dst_pub}  amount={amount_sol} SOL")
@@ -1945,7 +1981,7 @@ from src.solana.client import SolanaClient
 from src.utils.slippage import apply_slippage_min_out
 from src.dex.jupiter import JupiterClient, MINT_SOL
 from src.core.keystore import KeyStore
-from src.core.wallet_manager import WalletManager
+from src.solana.wallet_manager import WalletManager
 
 
 LAMPORTS_PER_SOL = 1_000_000_000
