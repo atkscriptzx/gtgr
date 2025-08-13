@@ -171,6 +171,7 @@ python-telegram-bot==21.4
 pyyaml==6.0.2
 croniter==3.0.3
 solana==0.30.2
+spl-token==0.3.0
 solders==0.20.0
 base58>=2.1.1
 ```
@@ -191,6 +192,7 @@ dependencies = [
   "pyyaml==6.0.2",
   "croniter==3.0.3",
   "solana==0.30.2",
+  "spl-token==0.3.0",
   "solders==0.20.0",
   "base58>=2.1.1",
 ]
@@ -1558,6 +1560,7 @@ class Swapper:
 
 ```python
 # src/dex/spl_move.py
+from src.flow.proxies_spl import transfer_spl_via_proxies
 class SPLRoutingNotImplemented(Exception):
     pass
 
