@@ -79,6 +79,14 @@ WATCH_ADDRESSES=suqh5sHtr8HyJ7q8scBimULPkPpA557prMG47xCHQfK,DfMxre4cKmvogbLrPigx
 MAX_MARKETCAP_USD=20000
 
 DEX_ENDPOINT=https://quote-api.jup.ag/v6
+DEX_PROVIDER=jupiter
+JUPITER_REQUIRE_PLATFORM=Raydium
+JUPITER_ONLY_DIRECT_ROUTES=true
+JUPITER_SLIPPAGE_BPS=250
+MINT_BTC=9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E
+MINT_ETH=2FPyTwcZLUg1MDrwsyoP4D6s1tM7hAkHYRjkNb5w6Pxk
+MINT_XRP=2jcHBYd9T2Mc9nhvFEBCDuBN1XjbbQUVow67WGWhv6zT
+
 SWAP_SPLIT_BTC=0.50
 SWAP_SPLIT_ETH=0.25
 SWAP_SPLIT_XRP=0.25
@@ -109,6 +117,7 @@ COPYTRADE_PRIORITY_SOL=0.01
 DEX_SWAP_PRIORITY_SOL=0.0
 
 ESTIMATED_SWAP_CU=300000
+
 
 ```
 
@@ -515,22 +524,34 @@ WantedBy=timers.target
 ```json
 #data/state.json
 {
-  "active_rpc": "https://empty-methodical-asphalt.solana-mainnet.quiknode.pro/121047ee49945da6b0adba7cd07826e4802812c3/",
+  "active_rpc"="https://empty-methodical-asphalt.solana-mainnet.quiknode.pro/121047ee49945da6b0adba7cd07826e4802812c3/",
   "wallets": {
-    "burner":         { "pubkey": "", "keyfile": "keys/burner.json" },
-    "collector":      { "pubkey": "", "keyfile": "keys/collector.json" },
-    "funder_active":  { "pubkey": "", "keyfile": "keys/funder_active.json" },
-    "funder_next":    { "pubkey": "", "keyfile": "keys/funder_next.json" },
-    "funder_standby": { "pubkey": "", "keyfile": "keys/funder_standby.json" },
-    "proxy3":         { "pubkey": "", "keyfile": "keys/proxy3.json" },
-    "proxy4":         { "pubkey": "", "keyfile": "keys/proxy4.json" },
-    "proxy5":         { "pubkey": "", "keyfile": "keys/proxy5.json" },
-    "proxy6":         { "pubkey": "", "keyfile": "keys/proxy6.json" }
+    "burner":         { "pubkey": null, "keyfile": "keys/burner.json" },
+    "collector":      { "pubkey": null, "keyfile": "keys/collector.json" },
+    "funder_active":  { "pubkey": null, "keyfile": "keys/funder_active.json" },
+    "funder_next":    { "pubkey": null, "keyfile": "keys/funder_next.json" },
+    "funder_standby": { "pubkey": null, "keyfile": "keys/funder_standby.json" },
+
+    "proxy1": { "pubkey": null, "keyfile": "keys/proxy1.json" },
+    "proxy2": { "pubkey": null, "keyfile": "keys/proxy2.json" },
+    "proxy3": { "pubkey": null, "keyfile": "keys/proxy3.json" },
+    "proxy4": { "pubkey": null, "keyfile": "keys/proxy4.json" },
+    "proxy5": { "pubkey": null, "keyfile": "keys/proxy5.json" },
+    "proxy6": { "pubkey": null, "keyfile": "keys/proxy6.json" },
+
+    "hold_hot":  { "pubkey": null, "keyfile": "keys/hold_hot.json" },
+    "hold_cold": { "pubkey": null, "keyfile": "keys/hold_cold.json" }
   },
   "last_rotation": null,
-  "last_kill_switch": null
+  "last_kill_switch": null,
+  "tokens_bought": {
+    "burner": [],
+    "collector": [],
+    "funder_active": [],
+    "funder_next": [],
+    "funder_standby": []
+  }
 }
-
 
 ```
 
@@ -710,6 +731,30 @@ class _SlippageCfg:
     def __init__(self):
         self.copytrade_slippage_bps = int(os.getenv("COPYTRADE_SLIPPAGE_BPS", "500"))
         self.dex_swap_slippage_bps = int(os.getenv("DEX_SWAP_SLIPPAGE_BPS", "250"))
+
+# Add near your other config loaders
+class TokenMintCfg:
+    def __init__(self, env):
+        self.btc = env.get("MINT_BTC", "").strip()
+        self.eth = env.get("MINT_ETH", "").strip()
+        self.xrp = env.get("MINT_XRP", "").strip()
+
+class _DexCfg:
+    def __init__(self, env):
+        self.provider = env.get("DEX_PROVIDER", "jupiter")
+        self.endpoint = env.get("DEX_ENDPOINT", "https://quote-api.jup.ag/v6")
+        self.jupiter_require_platform = env.get("JUPITER_REQUIRE_PLATFORM", "").strip()
+        self.jupiter_only_direct = env.get("JUPITER_ONLY_DIRECT_ROUTES", "true").lower() == "true"
+        self.jupiter_slippage_bps = int(env.get("JUPITER_SLIPPAGE_BPS", "50"))
+        self.mints = TokenMintCfg(env)
+
+# ensure: CFG.dex = _DexCfg(os.environ)
+
+
+# Ensure CFG.dex = _DexCfg(os.environ)
+
+
+# ... make sure CFG.dex = _DexCfg(os.environ)
 
 CFG = AppCfg()
 CFG.slippage = _SlippageCfg()
@@ -1362,45 +1407,78 @@ from __future__ import annotations
 import requests
 from base64 import b64decode
 from loguru import logger
+from typing import Any, Dict, Optional
+from src.core.config import CFG
 
-JUP_BASE = "https://quote-api.jup.ag"
-MINT_SOL = "So11111111111111111111111111111111111111112"  # native SOL pseudo-mint
+SOL_MINT = "So11111111111111111111111111111111111111112"
 
 class JupiterClient:
-    def __init__(self, session: requests.Session | None = None):
-        self.sess = session or requests.Session()
+    def __init__(self, base_url: str | None = None):
+        self.base_url = base_url or CFG.dex.endpoint.rstrip("/")
 
-    def quote(self, input_mint: str, output_mint: str, amount_in: int, slippage_bps: int) -> dict:
-        q = {
+    def quote(self, input_mint: str, output_mint: str, amount_lamports: int) -> Dict[str, Any]:
+        """
+        Get a quote and filter to a route whose every leg is platform == CFG.dex.jupiter_require_platform
+        when that flag is set (e.g., "Raydium").
+        """
+        url = f"{self.base_url}/quote"
+        params = {
             "inputMint": input_mint,
             "outputMint": output_mint,
-            "amount": str(amount_in),
-            "slippageBps": int(slippage_bps),
-            "swapMode": "ExactIn",
-            "onlyDirectRoutes": False,
+            "amount": str(amount_lamports),
+            "slippageBps": CFG.dex.jupiter_slippage_bps,
+            "onlyDirectRoutes": "true" if CFG.dex.jupiter_only_direct else "false",
         }
-        r = self.sess.get(f"{JUP_BASE}/v6/quote", params=q, timeout=10)
+        r = requests.get(url, params=params, timeout=15)
         r.raise_for_status()
-        return r.json()
+        data = r.json()
 
-    def build_swap_tx(self, quote_json: dict, user_pubkey: str, prioritization_lamports: int = 0) -> bytes:
+        # If user requires a specific platform (e.g., Raydium), pick the first all‑Raydium route
+        must = CFG.dex.jupiter_require_platform
+        if must:
+            routes = data.get("data") or data.get("routes") or []
+            for route in routes:
+                ok = True
+                # Jupiter v6 keeps legs under "routePlan"
+                for leg in route.get("routePlan", []):
+                    swap_info = leg.get("swapInfo", {})
+                    platform = (swap_info.get("platform") or swap_info.get("label") or "").strip()
+                    if platform.lower() != must.lower():
+                        ok = False
+                        break
+                if ok:
+                    logger.info(f"Selected {must}-only route")
+                    return {"route": route, "raw": data}
+
+            raise RuntimeError(f"No {must}-only route found for {output_mint}")
+
+        # Else return the best route as-is
+        best = (data.get("data") or data.get("routes") or [None])[0]
+        if not best:
+            raise RuntimeError("No route returned by Jupiter")
+        return {"route": best, "raw": data}
+
+    def build_swap_tx(self, route: Dict[str, Any], user_pubkey: str) -> bytes:
         """
-        Ask Jupiter to build a *legacy* transaction we can sign locally.
-        Returns the raw base64 decoded bytes of the transaction (unsigned).
+        Your existing method that calls POST /swap to get a ready-to-send transaction.
+        Keep as-is. It will build a tx that uses the selected route (Raydium-only if filtered above).
         """
+        url = f"{self.base_url}/swap"
         payload = {
-            "quoteResponse": quote_json,
             "userPublicKey": user_pubkey,
             "wrapAndUnwrapSol": True,
-            "asLegacyTransaction": True,                # easier to sign with solana-py Transaction
-            # Let Jupiter include a total tip in lamports (simpler than per-CU math here)
-            "prioritizationFeeLamports": int(prioritization_lamports) if prioritization_lamports > 0 else 0,
-            # "dynamicComputeUnitLimit": True,          # optional
+            "useSharedAccounts": True,
+            "asLegacyTransaction": True,
+            "computeUnitPriceMicroLamports": 0,
+            "dynamicComputeUnitLimit": True,
+            # Jupiter v6 expects the full route object:
+            "quoteResponse": route["route"],
         }
-        r = self.sess.post(f"{JUP_BASE}/v6/swap", json=payload, timeout=15)
+        r = requests.post(url, json=payload, timeout=20)
         r.raise_for_status()
-        swap_tx_b64 = r.json()["swapTransaction"]
-        return b64decode(swap_tx_b64)
+        data = r.json()
+        return bytes.fromhex(data["swapTransaction"])
+
 ```
 
 ```python
@@ -1409,11 +1487,33 @@ from loguru import logger
 from src.core.config import CFG
 from src.solana.client import SolanaClient
 from .client import DexClient, SwapAlloc
+from src.dex.client import DexClient
 
+SOL_MINT = "So11111111111111111111111111111111111111112"
+
+def _mint_for_symbol(symbol: str) -> str:
+    s = symbol.upper()
+    if s == "BTC":
+        return CFG.dex.mints.btc
+    if s == "ETH":
+        return CFG.dex.mints.eth
+    if s == "XRP":
+        return CFG.dex.mints.xrp
+    raise ValueError(f"Unsupported symbol: {symbol}")
 
 class Swapper:
     def __init__(self, dex: DexClient):
         self.dex = dex
+
+    def swap_sol_to_symbol(self, wallet_keyfile: str, amount_lamports: int, symbol: str) -> bytes:
+        out_mint = _mint_for_symbol(symbol)  # <-- Raydium mint from .env/CFG
+        quote = self.dex.quote(SOL_MINT, out_mint, amount_lamports)
+        # you already filter for Raydium-only in Jupiter client
+        route = quote["route"]
+        # get user pubkey from wallet_keyfile as you already do
+        user_pubkey = self._pubkey_str(wallet_keyfile)
+        tx_bytes = self.dex.build_swap_tx(route, user_pubkey)
+        return tx_bytes
 
     def swap_chunks(self, wallet: str, total_sol: float) -> None:
         """
@@ -1446,6 +1546,23 @@ class Swapper:
             remaining -= chunk
             logger.info(f"[swapper] chunk={chunk} SOL swapped; remaining={remaining} SOL")
 
+
+```
+
+```python
+# src/dex/spl_move.py
+class SPLRoutingNotImplemented(Exception):
+    pass
+
+def transfer_spl_via_proxies(*args, **kwargs):
+    """
+    Placeholder for SPL token routing via proxies.
+    Raise loudly so production does not silently fail.
+    """
+    raise SPLRoutingNotImplemented(
+        "SPL token routing via proxies is not implemented yet. "
+        "Post-DEX, assets are SPL tokens; implement token program transfers if you need to hop proxies."
+    )
 
 ```
 
@@ -1507,7 +1624,8 @@ class BurnerFlow:
 ```
 
 ```python
-# src/flow/collector.py 
+# src/flow/collector.py
+from __future__ import annotations
 from loguru import logger
 from src.core.config import CFG
 from src.core.state import State
@@ -1515,7 +1633,57 @@ from src.dex.client import DexClient
 from src.dex.swapper import Swapper
 from src.solana.client import SolanaClient
 from src.solana.wallet_manager import WalletManager
-from src.flow.proxies import transfer_via_proxies
+
+# NEW: SPL routing (token transfers via proxies)
+from src.flow.proxies_spl import transfer_spl_via_proxies
+
+# NEW: for reading token balances
+from solders.pubkey import Pubkey
+from solana.rpc.api import Client
+from spl.token.constants import TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID
+from spl.token.instructions import get_associated_token_address
+
+# ============================
+# 🔁 REPLACE WITH REAL MINTS!
+# ============================
+mint_btc = CFG.dex.mints.btc
+mint_eth = CFG.dex.mints.eth
+mint_xrp = CFG.dex.mints.xrp
+
+def _get_collector_pubkey(state: State) -> str | None:
+    return state.get_pubkey("collector")
+
+
+def _get_ui_token_balance(client: Client, owner_pubkey_str: str, mint_str: str) -> float:
+    """
+    Returns the owner's token balance in UI units (amount / 10**decimals).
+    Creates no accounts, just reads the collector's ATA if it exists.
+    """
+    owner = Pubkey.from_string(owner_pubkey_str)
+    mint = Pubkey.from_string(mint_str)
+
+    ata = get_associated_token_address(owner, mint, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID)
+    info = client.get_account_info(ata)
+
+    # If ATA doesn't exist, balance is 0.0
+    if not (hasattr(info, "value") and info.value is not None):
+        return 0.0
+
+    bal = client.get_token_account_balance(ata)
+    # Prefer uiAmountString if available; else compute from amount & decimals
+    try:
+        if hasattr(bal, "value") and hasattr(bal.value, "ui_amount_string"):
+            return float(bal.value.ui_amount_string)
+    except Exception:
+        pass
+
+    # Fallback path
+    try:
+        amount = int(bal.value.amount)  # base units
+        dec = int(bal.value.decimals)
+        return amount / (10 ** dec)
+    except Exception:
+        return 0.0
 
 
 class CollectorFlow:
@@ -1527,70 +1695,311 @@ class CollectorFlow:
 
     def run_0450(self) -> None:
         """
-        04:50 job: swap collector SOL into BTC/ETH/XRP in chunks, then route 5% HOT / 95% COLD
-        to vaults via two-hop proxies. Finally, burn & regenerate collector + proxies.
+        04:50 job:
+          1) Swap collector's SOL into BTC/ETH/XRP in chunks using your 50/25/25 split.
+          2) Read the resulting token balances (BTC/ETH/XRP) in the collector.
+          3) Route per‑token 5% HOT and 95% COLD via two-hop proxies (SPL transfers).
+          4) Burn & regenerate collector + first two proxies (optional; keep consistent with your policy).
         """
-        bal = self.sol.get_balance(self.collector_keyfile)
-        if bal <= 0:
-            logger.info("Collector empty; nothing to process.")
+        state = State()
+        collector_addr = _get_collector_pubkey(state)
+        if not collector_addr:
+            logger.error("Collector pubkey missing; aborting collector flow.")
             return
 
-        # Swap chunks from the *collector* wallet
-        swapper = Swapper(self.dex)
-        swapper.swap_chunks(wallet=self.collector_keyfile, total_sol=bal)
+        # 1) If there is SOL in the collector, swap it first
+        bal_sol = self.sol.get_balance(self.collector_keyfile)
+        if bal_sol <= 0:
+            logger.info("Collector SOL empty; skipping swaps.")
+        else:
+            logger.info(f"[collector] Swapping {bal_sol:.6f} SOL into BTC/ETH/XRP (50/25/25)")
+            swapper = Swapper(self.dex)
+            swapper.swap_chunks(wallet=self.collector_keyfile, total_sol=bal_sol)
 
-        # Split SOL to vaults (if you’re holding SPL post-swap, this section only applies
-        # when you choose to swap partially / or before swapping)
-        hot_pct = CFG.vault_split.hot
-        cold_pct = CFG.vault_split.cold
-        amt_hot = round(bal * hot_pct, 9)
-        amt_cold = max(0.0, bal - amt_hot)
-        logger.info(f"[vault split] HOT={amt_hot}  COLD={amt_cold}  (hot%={hot_pct:.2%}, cold%={cold_pct:.2%})")
+        # 2) Read SPL token balances now held by the collector
+        rpc_client: Client = self.sol.client  # underlying solana-py client
+        total_btc_ui = _get_ui_token_balance(rpc_client, collector_addr, MINT_BTC)
+        total_eth_ui = _get_ui_token_balance(rpc_client, collector_addr, MINT_ETH)
+        total_xrp_ui = _get_ui_token_balance(rpc_client, collector_addr, MINT_XRP)
 
-        # Two-hop proxy routes for SOL transfers (L1 only)
-        if amt_hot > 0:
-            transfer_via_proxies(
+        logger.info(
+            f"[collector SPL balances] BTC={total_btc_ui:.6f} | ETH={total_eth_ui:.6f} | XRP={total_xrp_ui:.6f}"
+        )
+
+        hot_pct = CFG.vault_split.hot   # e.g., 0.05
+        cold_pct = CFG.vault_split.cold # e.g., 0.95
+
+        def _route_token(mint: str, total_ui: float) -> None:
+            if total_ui <= 0:
+                return
+            amt_hot = total_ui * hot_pct
+            amt_cold = max(0.0, total_ui - amt_hot)
+
+            # HOT: collector -> proxy3 -> proxy4 -> hold_hot
+            transfer_spl_via_proxies(
                 hops=[CFG.PROXY3_KEY, CFG.PROXY4_KEY],
                 src_key=CFG.COLLECTOR_KEY,
                 dst_key=CFG.HOLD_HOT_KEY,
-                amount_sol=amt_hot,
-                delay_s_min=CFG.proxy.delay_s_min,
-                delay_s_max=CFG.proxy.delay_s_max,
-                burn_and_regen_on_use=True,
-            )
-        if amt_cold > 0:
-            transfer_via_proxies(
-                hops=[CFG.PROXY5_KEY, CFG.PROXY6_KEY],
-                src_key=CFG.COLLECTOR_KEY,
-                dst_key=CFG.HOLD_COLD_KEY,
-                amount_sol=amt_cold,
+                mint_str=mint,
+                amount_ui=amt_hot,
                 delay_s_min=CFG.proxy.delay_s_min,
                 delay_s_max=CFG.proxy.delay_s_max,
                 burn_and_regen_on_use=True,
             )
 
-        # Rotate collector + first two proxies post use
-        logger.info("Collector processed; burn & recreate collector + proxies.")
+            # COLD: collector -> proxy5 -> proxy6 -> hold_cold
+            transfer_spl_via_proxies(
+                hops=[CFG.PROXY5_KEY, CFG.PROXY6_KEY],
+                src_key=CFG.COLLECTOR_KEY,
+                dst_key=CFG.HOLD_COLD_KEY,
+                mint_str=mint,
+                amount_ui=amt_cold,
+                delay_s_min=CFG.proxy.delay_s_min,
+                delay_s_max=CFG.proxy.delay_s_max,
+                burn_and_regen_on_use=True,
+            )
+
+        # 3) Route each token to vaults via proxies
+        _route_token(MINT_BTC, total_btc_ui)
+        _route_token(MINT_ETH, total_eth_ui)
+        _route_token(MINT_XRP, total_xrp_ui)
+
+        # 4) Rotate collector + (optionally) proxies used elsewhere per your policy.
+        # NOTE: We already burn proxies inside the SPL router AFTER they forward tokens.
+        # If you also rotate the collector each cycle, do it here:
+        logger.info("Collector processed; (optional) burn & recreate collector for privacy hygiene.")
         self.wm.replace_wallet("collector", CFG.COLLECTOR_KEY)
-        self.wm.replace_wallet("proxy1", CFG.PROXY1_KEY)
-        self.wm.replace_wallet("proxy2", CFG.PROXY2_KEY)
+
 
 ```
 
 ```python
-# src/flow/funders.py 
+# src/flow/proxies_spl.py
+from __future__ import annotations
+from time import sleep
+from typing import List, Tuple
+from loguru import logger
+
+from solders.pubkey import Pubkey
+from solders.signature import Signature
+from solana.rpc.api import Client
+from solana.rpc.types import TxOpts
+from solana.transaction import Transaction
+from solana.compute_budget_program import ComputeBudgetProgram
+
+from spl.token.constants import TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID
+from spl.token.instructions import (
+    create_associated_token_account,
+    get_associated_token_address,
+    transfer_checked,
+)
+
+from src.solana.keypair_io import load_keypair_from_file
+from src.core.keystore import KeyStore
+from src.core.state import State
+from src.solana.wallet_manager import WalletManager
+from src.core.config import CFG
+
+
+def _resolve_keyfile_path(cfg_key: str) -> str:
+    # cfg_key is like CFG.COLLECTOR_KEY -> "collector.json"
+    return str(KeyStore.path(cfg_key))
+
+
+def _owner_pubkey_from_keyfile(keyfile: str) -> Pubkey:
+    return load_keypair_from_file(keyfile).pubkey()
+
+
+def _get_mint_decimals(client: Client, mint: Pubkey) -> int:
+    # Fast + simple: getTokenSupply has `decimals`
+    resp = client.get_token_supply(mint)
+    if hasattr(resp, "value") and hasattr(resp.value, "decimals"):
+        return int(resp.value.decimals)
+    # Fallback: default 6 if RPCs are odd (many SPLs are 6)
+    return 6
+
+
+def _ensure_ata_ixs(client: Client, payer: Pubkey, owner: Pubkey, mint: Pubkey) -> Tuple[Pubkey, list]:
+    ata = get_associated_token_address(owner, mint, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID)
+    # If ATA does not exist, emit a create ix
+    info = client.get_account_info(ata)
+    ixs = []
+    if not (hasattr(info, "value") and info.value is not None):
+        ixs.append(create_associated_token_account(payer, owner, mint, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID))
+    return ata, ixs
+
+
+def _priority_ixs() -> list:
+    price_micro = int(
+        CFG.priority.dex_swap_priority_sol * 1_000_000 * 1_000_000 // max(CFG.priority.estimated_swap_cu, 1)
+    ) if CFG.priority.dex_swap_priority_sol > 0 else 0
+    ixs = [ComputeBudgetProgram.set_compute_unit_limit(CFG.priority.estimated_swap_cu)]
+    if price_micro > 0:
+        ixs.append(ComputeBudgetProgram.set_compute_unit_price(price_micro))
+    return ixs
+
+
+def _spl_transfer_one_leg(
+    client: Client,
+    mint: Pubkey,
+    amount_ui: float,
+    src_keyfile: str,
+    dst_owner_keyfile_or_pub: str | Pubkey,
+    *,
+    decimals: int | None = None,
+    skip_preflight: bool = True,
+    max_retries: int = 3,
+) -> str:
+    """
+    Transfer SPL tokens (mint) in UI units from src_owner -> dst_owner.
+    - Creates ATAs on-demand.
+    - Uses transfer_checked to enforce decimals.
+    """
+    src_kp = load_keypair_from_file(src_keyfile)
+    src_owner = src_kp.pubkey()
+
+    # Accept either keyfile path or direct pubkey for dst owner
+    if isinstance(dst_owner_keyfile_or_pub, Pubkey):
+        dst_owner = dst_owner_keyfile_or_pub
+    else:
+        dst_owner = load_keypair_from_file(dst_owner_keyfile_or_pub).pubkey()
+
+    # Resolve/ensure ATAs
+    src_ata, src_ata_ixs = _ensure_ata_ixs(client, payer=src_owner, owner=src_owner, mint=mint)
+    dst_ata, dst_ata_ixs = _ensure_ata_ixs(client, payer=src_owner, owner=dst_owner, mint=mint)
+
+    # Amount in base units
+    dec = int(decimals) if decimals is not None else _get_mint_decimals(client, mint)
+    base_amount = int(round(amount_ui * (10 ** dec)))
+
+    # Recent blockhash
+    bh = client.get_latest_blockhash()
+    blockhash = bh.value.blockhash if hasattr(bh, "value") else bh["result"]["value"]["blockhash"]
+
+    # Build tx
+    tx = Transaction(recent_blockhash=blockhash, fee_payer=src_owner)
+    for ix in _priority_ixs():
+        tx.add(ix)
+    # create ATAs if needed (payer = src_owner)
+    for ix in src_ata_ixs + dst_ata_ixs:
+        tx.add(ix)
+    # transfer_checked
+    tx.add(
+        transfer_checked(
+            program_id=TOKEN_PROGRAM_ID,
+            source=src_ata,
+            mint=mint,
+            dest=dst_ata,
+            owner=src_owner,
+            amount=base_amount,
+            decimals=dec,
+            signers=None,  # owner signs
+        )
+    )
+
+    # Send + confirm
+    resp = client.send_transaction(tx, src_kp, opts=TxOpts(skip_preflight=skip_preflight, max_retries=max_retries))
+    sig = str(resp.value) if hasattr(resp, "value") else str(resp["result"])
+    try:
+        client.confirm_transaction(Signature.from_string(sig))
+    except Exception:
+        pass
+    return sig
+
+
+def _role_from_cfg_filename(cfg_key: str) -> str:
+    name = cfg_key.lower()
+    for r in ["proxy1","proxy2","proxy3","proxy4","proxy5","proxy6","collector","hold_hot","hold_cold","funder_active","funder_next","funder_standby","burner"]:
+        if r in name:
+            return r
+    return "proxy"
+
+
+def transfer_spl_via_proxies(
+    *,
+    hops: List[str],              # e.g. [CFG.PROXY3_KEY, CFG.PROXY4_KEY]
+    src_key: str,                 # e.g. CFG.COLLECTOR_KEY
+    dst_key: str,                 # e.g. CFG.HOLD_HOT_KEY
+    mint_str: str,                # token mint address (BTC/ETH/XRP wrapped)
+    amount_ui: float,             # human units (e.g., 12.34)
+    decimals: int | None = None,  # optional override
+    delay_s_min: float = 0,
+    delay_s_max: float = 0,
+    burn_and_regen_on_use: bool = True,
+) -> None:
+    """
+    Move SPL tokens along src -> hops... -> dst, creating ATAs as needed.
+    Burns/recreates intermediate proxies *after* they forward tokens.
+    """
+    wm = WalletManager()
+    state = State()
+    client = Client(state.load().get("active_rpc") or CFG.rpc_primary)
+
+    seq = [src_key] + list(hops) + [dst_key]
+    kfs = [_resolve_keyfile_path(k) for k in seq]
+    mint = Pubkey.from_string(mint_str)
+
+    # Ensure destination owner pubkey exists in state (and create wallet file if needed)
+    for cfg_key in (hops + [dst_key]):
+        role = _role_from_cfg_filename(cfg_key)
+        if not state.get_pubkey(role):
+            # create the wallet file if missing so we can get a pubkey
+            wm.create_wallet(role, cfg_key)
+
+    import random
+    last_forwarded_role: str | None = None
+
+    for i in range(len(kfs) - 1):
+        src_kf = kfs[i]
+        dst_kf = kfs[i + 1]
+        dst_role = _role_from_cfg_filename(seq[i + 1])
+        dst_pub = wm.state.get_pubkey(dst_role)
+        if not dst_pub:
+            dst_pub = wm.create_wallet(dst_role, seq[i + 1]).pubkey
+
+        logger.info(f"[SPL proxy] hop {i+1}/{len(kfs)-1}: {src_kf} -> {dst_pub} {amount_ui} (mint={mint_str})")
+        sig = _spl_transfer_one_leg(
+            client=client,
+            mint=mint,
+            amount_ui=amount_ui,
+            src_keyfile=src_kf,
+            dst_owner_keyfile_or_pub=Pubkey.from_string(dst_pub),
+            decimals=decimals,
+            skip_preflight=True,
+        )
+        logger.info(f"[SPL proxy] tx={sig}")
+
+        # Burn+regen the *previous* intermediate once it has forwarded tokens
+        if burn_and_regen_on_use and last_forwarded_role:
+            logger.info(f"[SPL proxy] burn+regen {last_forwarded_role}")
+            wm.replace_wallet(last_forwarded_role, last_forwarded_role + ".json")
+
+        # Update last_forwarded_role if current hop was an intermediate destination
+        if 0 <= i < len(kfs) - 2:
+            last_forwarded_role = _role_from_cfg_filename(seq[i + 1])
+        else:
+            last_forwarded_role = None
+
+        if delay_s_min or delay_s_max:
+            sleep(random.uniform(delay_s_min, delay_s_max))
+
+    # No burn of final destination (vault)
+```
+
+```python
+# src/flow/funders.py
+from __future__ import annotations
+import json
+from pathlib import Path
 from loguru import logger
 from src.solana.client import SolanaClient
 from src.solana.wallet_manager import WalletManager
-from pathlib import Path
-import json
 from src.solana.keypair_io import load_keypair_from_file
 from src.core.state import State
 from src.core.keystore import KeyStore
 from src.core.config import CFG
-from src.flow.rotation import DailyRotation
 from src.flow.proxies import transfer_via_proxies
-from src.core.config import CFG
+
 
 class FunderRotation:
     def __init__(self, sol: SolanaClient, wm: WalletManager, active_kf: str, next_kf: str, standby_kf: str, collector_addr: str):
@@ -1601,7 +2010,8 @@ class FunderRotation:
         self.standby_kf = standby_kf
         self.collector = collector_addr
 
-    def ensure_active_has_5(self):
+    def ensure_active_has_5(self) -> None:
+        """Top up ACTIVE funder to 5 SOL from collector if needed."""
         try:
             bal = self.sol.get_balance(self.active_kf)
             need = max(0.0, 5.0 - bal)
@@ -1611,10 +2021,17 @@ class FunderRotation:
                     self._pubkey_of(self.active_kf),
                     need,
                 )
+                logger.info(f"Topped up active funder by {need:.4f} SOL")
         except Exception as e:
             logger.exception(f"ensure_active_has_5 failed: {e}")
 
-    def rotate(self):
+    def rotate(self) -> None:
+        """
+        ACTIVE -> (burn if empty)
+        NEXT   -> ACTIVE
+        STANDBY-> NEXT
+        new STANDBY generated
+        """
         logger.info("Rotating funders: active->(burn if empty), next->active, standby->next, new standby")
         state = State()
         try:
@@ -1633,7 +2050,7 @@ class FunderRotation:
         logger.info("Rotation complete.")
 
     # --- helpers ---
-    def _copy_keyfile(self, src: str, dst: str):
+    def _copy_keyfile(self, src: str, dst: str) -> None:
         sp = KeyStore.path(src)
         dp = KeyStore.path(dst)
         if not sp.exists():
@@ -1646,17 +2063,20 @@ class FunderRotation:
         kp = load_keypair_from_file(KeyStore.path(keyfile))
         return str(kp.pubkey())
 
-	def fund_funder_from_collector(amount_sol: float):
-	    transfer_via_proxies(
-	        hops=[CFG.PROXY1_KEY, CFG.PROXY2_KEY],
-	        src_key=CFG.COLLECTOR_KEY,
-	        dst_key=CFG.FUNDER_ACTIVE_KEY,
-	        amount_sol=amount_sol,
-	        delay_s_min=CFG.proxy.delay_s_min,
-	        delay_s_max=CFG.proxy.delay_s_max,
-	        burn_and_regen_on_use=True,
-	    )
 
+def fund_funder_from_collector(amount_sol: float) -> None:
+    """
+    Optional helper: fund the ACTIVE funder from collector via two proxies.
+    """
+    transfer_via_proxies(
+        hops=[CFG.PROXY1_KEY, CFG.PROXY2_KEY],
+        src_key=CFG.COLLECTOR_KEY,
+        dst_key=CFG.FUNDER_ACTIVE_KEY,
+        amount_sol=amount_sol,
+        delay_s_min=CFG.proxy.delay_s_min,
+        delay_s_max=CFG.proxy.delay_s_max,
+        burn_and_regen_on_use=True,
+    )
 
 ```
 
@@ -1713,7 +2133,6 @@ def transfer_via_proxies(
 
 ```python
 # src/flow/rotation.py
-
 from loguru import logger
 from src.core.config import CFG
 from src.core.state import State
@@ -1724,10 +2143,9 @@ from src.flow.collector import CollectorFlow
 from src.flow.funders import FunderRotation
 from src.dex.client import DexClient
 from src.core.keystore import KeyStore
-from time import sleep
 
 class DailyRotation:
-    def execute(self):
+    def execute(self) -> None:
         logger.info("⏱ 04:45 drain -> 04:50 DEX -> 05:00 rotate sequence")
         state = State()
         wm = WalletManager(state)
@@ -1766,74 +2184,6 @@ class DailyRotation:
         fr.ensure_active_has_5()
         logger.info("✅ Daily rotation finished.")
 
-	def _role_from_filename(fname: str) -> str:
-	    n = fname.lower()
-	    for k in ("proxy1", "proxy2", "proxy3", "proxy4", "proxy5", "proxy6"):
-	        if k in n:
-	            return k
-	    return "proxy"
-
-	def transfer_via_proxies(
-    *,
-    hops: list[str],          # e.g. [CFG.PROXY3_KEY, CFG.PROXY4_KEY]
-    src_key: str,             # e.g. CFG.COLLECTOR_KEY
-    dst_key: str,             # e.g. CFG.HOLD_HOT_KEY
-    amount_sol: float,
-    delay_s_min: int = 0,
-    delay_s_max: int = 0,
-    burn_and_regen_on_use: bool = True,
-) -> None:
-    """
-    Move SOL from src -> hops... -> dst (L1 SOL transfers only).
-    NOTE: This does NOT move SPL tokens. Post-DEX token routing needs SPL transfers.
-    """
-    sol = SolanaClient()
-    wm  = WalletManager()
-
-    # Resolve concrete keyfile paths
-    seq = [src_key] + hops + [dst_key]
-    kfs = [str(KeyStore.path(k)) for k in seq]
-
-    # sequential transfers along the path
-    for i in range(len(kfs) - 1):
-        src_kf = kfs[i]
-        dst_kf = kfs[i + 1]
-        dst_pub = wm.state.get_pubkey(_role_from_filename(dst_kf)) or wm.create_wallet(_role_from_filename(dst_kf), dst_kf.split("/")[-1]).pubkey  # ensure pubkey exists
-
-        logger.info(f"[proxy] hop {i+1}/{len(kfs)-1}: {src_kf} -> {dst_pub}  amount={amount_sol} SOL")
-        sol.transfer(
-            src_keyfile=src_kf,
-            dst_addr=dst_pub,
-            amount_sol=amount_sol,
-            priority_micro_lamports=0,
-            skip_preflight=True,
-        )
-
-        # burn+regen intermediate proxy after it was *destination* of previous hop (i >= 0 and i < last-1)
-        if burn_and_regen_on_use and 0 < i < len(kfs) - 1:
-            used_cfg_fname = seq[i]  # the cfg key we just sent to
-            role = _role_from_filename(used_cfg_fname)
-            logger.info(f"[proxy] burn+regen {role}")
-            wm.replace_wallet(role, used_cfg_fname)
-
-        if delay_s_min or delay_s_max:
-            import random
-            sleep(random.uniform(delay_s_min, delay_s_max))
-	
-	
-	def _logical_role_from_cfg_key(cfg_key: str) -> str:
-	    """
-	    Derive a stable role name from a cfg key filename.
-	    If your WM expects specific role names ('proxy1', 'proxy2', ...), map them here.
-	    """
-	    name = cfg_key.lower()
-	    if "proxy1" in name: return "proxy1"
-	    if "proxy2" in name: return "proxy2"
-	    if "proxy3" in name: return "proxy3"
-	    if "proxy4" in name: return "proxy4"
-	    if "proxy5" in name: return "proxy5"
-	    if "proxy6" in name: return "proxy6"
-	    return "proxy"
 ```
 
 ---
@@ -2200,7 +2550,6 @@ class TGBot:
 
 ```python
 # src/telegram/commands.py
-# src/telegram/commands.py
 from loguru import logger
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -2387,13 +2736,42 @@ def save_all_time_usd(v: float) -> None:
 
 ```python
 # src/reports/daily_report.py
+import os
+from datetime import datetime
 from loguru import logger
+import requests
+
+from src.reports.pnl_store import get_all_time_usd, get_day_usd
+
+def _send_telegram(msg: str) -> None:
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID_MAIN", "")
+    if not token or not chat_id:
+        logger.warning("TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID_MAIN missing; skipping Telegram report")
+        return
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    try:
+        r = requests.post(url, json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}, timeout=10)
+        r.raise_for_status()
+    except Exception as e:
+        logger.exception(f"Failed to send Telegram report: {e}")
 
 def main():
-    logger.info("Daily PnL report (stub) -> Telegram")
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    at = get_all_time_usd()
+    day = get_day_usd(today)
+    msg = (
+        f"📊 <b>Daily PnL Report</b>\n"
+        f"Date (UTC): {today}\n"
+        f"• Today: ${day:,.2f}\n"
+        f"• All-time: ${at:,.2f}"
+    )
+    _send_telegram(msg)
+    logger.info("Daily PnL report sent.")
 
 if __name__ == '__main__':
     main()
+
 ```
 
 ---
@@ -2403,34 +2781,93 @@ if __name__ == '__main__':
 ```python
 # src/sched/at_0445_drain.py
 from loguru import logger
+from src.core.keystore import KeyStore
+from src.core.config import CFG
+from src.core.state import State
+from src.solana.client import SolanaClient
+from src.solana.wallet_manager import WalletManager
+from src.flow.burner import BurnerFlow
 
 def main():
     logger.info("[04:45] Drain burners/actives to collector; burn & recreate")
+    sol = SolanaClient()
+    wm = WalletManager()
+    state = State()
+    collector_addr = state.get_pubkey("collector")
+    if not collector_addr:
+        logger.error("Collector address missing — aborting 04:45 drain.")
+        return
+
+    BurnerFlow(
+        sol=sol,
+        wm=wm,
+        burner_keyfile=str(KeyStore.path(CFG.BURNER_KEY)),
+        collector_addr=collector_addr,
+        funder_active_keyfile=str(KeyStore.path(CFG.FUNDER_ACTIVE_KEY)),
+    ).forced_drain()
 
 if __name__ == '__main__':
     main()
 ```
+
 
 ```python
 # src/sched/at_0450_dex.py
 from loguru import logger
+from src.core.keystore import KeyStore
+from src.core.config import CFG
+from src.solana.wallet_manager import WalletManager
+from src.solana.client import SolanaClient
+from src.dex.client import DexClient
+from src.flow.collector import CollectorFlow
 
 def main():
-    logger.info("[04:50] Collector -> DEX (50/25/25) in 50 SOL chunks; route 95% cold / 5% hot via 2 proxies; burn proxies")
+    logger.info("[04:50] Collector -> DEX (50/25/25) in chunks; route 95/5 via proxies; burn proxies")
+    sol = SolanaClient()
+    wm = WalletManager()
+    dex = DexClient(CFG.dex.endpoint)
+    CollectorFlow(
+        sol=sol, dex=dex, wm=wm, collector_keyfile=str(KeyStore.path(CFG.COLLECTOR_KEY))
+    ).run_0450()
 
 if __name__ == '__main__':
     main()
 ```
 
+
 ```python
 # src/sched/at_0500_rotate.py
 from loguru import logger
+from src.core.config import CFG
+from src.core.state import State
+from src.solana.client import SolanaClient
+from src.solana.wallet_manager import WalletManager
+from src.flow.funders import FunderRotation
 
 def main():
-    logger.info("[05:00] Rotate funders (active->burn, next->active, standby->next, create standby)")
+    logger.info("[05:00] Rotate funders (active->burn if empty, next->active, standby->next, create standby)")
+    sol = SolanaClient()
+    wm = WalletManager()
+    state = State()
+    collector_addr = state.get_pubkey("collector")
+    if not collector_addr:
+        logger.error("Collector address missing — aborting 05:00 rotation.")
+        return
+    fr = FunderRotation(
+        sol=sol,
+        wm=wm,
+        active_kf=CFG.FUNDER_ACTIVE_KEY,
+        next_kf=CFG.FUNDER_NEXT_KEY,
+        standby_kf=CFG.FUNDER_STANDBY_KEY,
+        collector_addr=collector_addr,
+    )
+    fr.rotate()
+    fr.ensure_active_has_5()
+    logger.info("✅ Rotation complete.")
 
 if __name__ == '__main__':
     main()
+
 ```
 
 ---
