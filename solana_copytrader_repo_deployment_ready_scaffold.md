@@ -96,6 +96,14 @@ GPG_KEY_EMAIL=you@example.com
 PGP_BACKUP_ENABLED=true
 SYSTEMD_SERVICE_NAME=copytrader.service
 
+COPYTRADE_SLIPPAGE_BPS=500
+DEX_SWAP_SLIPPAGE_BPS=250
+
+COPYTRADE_PRIORITY_SOL=0.01
+DEX_SWAP_PRIORITY_SOL=0.0
+
+ESTIMATED_SWAP_CU=300000
+
 ```
 
 ---
@@ -574,12 +582,14 @@ if __name__ == "__main__":
 
 ```python
 # src/core/config.py
+
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 import os
 from pathlib import Path
 
 load_dotenv()
+
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.getenv(name, default))
@@ -595,21 +605,19 @@ def _env_int(name: str, default: int) -> int:
 def _env_list(name: str) -> list[str]:
     v = os.getenv(name, "")
     return [x for x in (s.strip() for s in v.split(",")) if x]
+
 class Splits(BaseModel):
     btc: float = Field(default_factory=lambda: _env_float("SWAP_SPLIT_BTC", 0.50))
     eth: float = Field(default_factory=lambda: _env_float("SWAP_SPLIT_ETH", 0.25))
     xrp: float = Field(default_factory=lambda: _env_float("SWAP_SPLIT_XRP", 0.25))
 
- 
-
-
 class ProxyCfg(BaseModel):
     hops: int = Field(default_factory=lambda: _env_int("PROXY_HOPS", 2))
     delay_s_min: int = Field(default_factory=lambda: _env_int("PROXY_DELAY_S_MIN", 3))
     delay_s_max: int = Field(default_factory=lambda: _env_int("PROXY_DELAY_S_MAX", 9))
- 
+
 class DexCfg(BaseModel):
-    endpoint: str = Field(default_factory=lambda: os.getenv("DEX_ENDPOINT","https://dex.invalid"))
+    endpoint: str = Field(default_factory=lambda: os.getenv("DEX_ENDPOINT", "https://dex.invalid"))
     chunk_size_sol: float = Field(default_factory=lambda: _env_float("CHUNK_SIZE_SOL", 50))
     delay_s_min: int = Field(default_factory=lambda: _env_int("CHUNK_DELAY_S_MIN", 5))
     delay_s_max: int = Field(default_factory=lambda: _env_int("CHUNK_DELAY_S_MAX", 10))
@@ -620,27 +628,60 @@ class TradingCfg(BaseModel):
     burner_target_sol: float = Field(default_factory=lambda: _env_float("BURNER_TARGET_SOL", 16))
     max_marketcap_usd: int = Field(default_factory=lambda: _env_int("MAX_MARKETCAP_USD", 20000))
     watch_addresses: list[str] = Field(default_factory=lambda: _env_list("WATCH_ADDRESSES"))
- 
 
 class AppCfg(BaseModel):
-    env: str = Field(default_factory=lambda: os.getenv('ENV','prod'))
-    tz: str = Field(default_factory=lambda: os.getenv('TZ','America/Nassau'))
-    data_dir: Path = Field(default_factory=lambda: Path(os.getenv('DATA_DIR','./data')).resolve())
-    log_dir: Path = Field(default_factory=lambda: Path(os.getenv('LOG_DIR','./logs')).resolve())
+    env: str = Field(default_factory=lambda: os.getenv('ENV', 'prod'))
+    tz: str = Field(default_factory=lambda: os.getenv('TZ', 'America/Nassau'))
+    data_dir: Path = Field(default_factory=lambda: Path(os.getenv('DATA_DIR', './data')).resolve())
+    log_dir: Path = Field(default_factory=lambda: Path(os.getenv('LOG_DIR', './logs')).resolve())
     whitelist_ips: list[str] = Field(default_factory=lambda: _env_list('WHITELISTED_IPS'))
-    kill_switch_enabled: bool = Field(default_factory=lambda: os.getenv('KILL_SWITCH_ENABLED','true').strip().lower()=='true')
-    rpc_primary: str = Field(default_factory=lambda: os.getenv('RPC_PRIMARY',''))
-    rpc_pool_file: str = Field(default_factory=lambda: os.getenv('RPC_POOL_FILE','./config/rpc_pool.txt'))
-    COLLECTOR_KEY: str = Field(default_factory=lambda: os.getenv('COLLECTOR_KEY','collector.json'))
-    FUNDER_ACTIVE_KEY: str = Field(default_factory=lambda: os.getenv('FUNDER_ACTIVE_KEY','funder_active.json'))
-    FUNDER_NEXT_KEY: str = Field(default_factory=lambda: os.getenv('FUNDER_NEXT_KEY','funder_next.json'))
-    FUNDER_STANDBY_KEY: str = Field(default_factory=lambda: os.getenv('FUNDER_STANDBY_KEY','funder_standby.json'))
-    BURNER_KEY: str = Field(default_factory=lambda: os.getenv('BURNER_KEY','burner.json'))
+    kill_switch_enabled: bool = Field(default_factory=lambda: os.getenv('KILL_SWITCH_ENABLED', 'true').strip().lower() == 'true')
+    rpc_primary: str = Field(default_factory=lambda: os.getenv('RPC_PRIMARY', ''))
+    rpc_pool_file: str = Field(default_factory=lambda: os.getenv('RPC_POOL_FILE', './config/rpc_pool.txt'))
+    COLLECTOR_KEY: str = Field(default_factory=lambda: os.getenv('COLLECTOR_KEY', 'collector.json'))
+    FUNDER_ACTIVE_KEY: str = Field(default_factory=lambda: os.getenv('FUNDER_ACTIVE_KEY', 'funder_active.json'))
+    FUNDER_NEXT_KEY: str = Field(default_factory=lambda: os.getenv('FUNDER_NEXT_KEY', 'funder_next.json'))
+    FUNDER_STANDBY_KEY: str = Field(default_factory=lambda: os.getenv('FUNDER_STANDBY_KEY', 'funder_standby.json'))
+    BURNER_KEY: str = Field(default_factory=lambda: os.getenv('BURNER_KEY', 'burner.json'))
     dex: DexCfg = Field(default_factory=DexCfg)
     proxy: ProxyCfg = Field(default_factory=ProxyCfg)
     trading: TradingCfg = Field(default_factory=TradingCfg)
- 
+
+# Extra trading config for slippage settings
+class _SlippageCfg:
+    def __init__(self):
+        # For trades triggered by wallet copy-trading
+        self.copytrade_slippage_bps = int(os.getenv("COPYTRADE_SLIPPAGE_BPS", "550"))
+        # For general DEX swaps (profit sweep, kill switch, etc.)
+        self.dex_swap_slippage_bps = int(os.getenv("DEX_SWAP_SLIPPAGE_BPS", "300"))
+
+# Extra trading config for priority fee settings
+class PriorityCfg(BaseModel):
+    copytrade_priority_sol: float = Field(default_factory=lambda: float(os.getenv("COPYTRADE_PRIORITY_SOL", "0.01")))
+    dex_swap_priority_sol: float = Field(default_factory=lambda: float(os.getenv("DEX_SWAP_PRIORITY_SOL", "0.0")))
+    estimated_swap_cu: int = Field(default_factory=lambda: int(float(os.getenv("ESTIMATED_SWAP_CU", "300000"))))
+
+# Create one CFG object and attach extras to it
 CFG = AppCfg()
+CFG.slippage = _SlippageCfg()
+CFG.priority = PriorityCfg()
+
+```
+
+```python
+#src/utils/slippage.py
+from decimal import Decimal
+
+def apply_slippage_min_out(quoted_out: int | float, slippage_bps: int) -> int:
+    """
+    Convert a quoted expected output amount into a min_out with slippage protection.
+    quoted_out: expected OUT amount (smallest units)
+    slippage_bps: basis points (e.g., 550 = 5.5%)
+    """
+    q = Decimal(str(quoted_out))
+    factor = (Decimal(10_000) - Decimal(slippage_bps)) / Decimal(10_000)
+    min_out = int((q * factor).to_integral_value(rounding="ROUND_FLOOR"))
+    return max(min_out, 1) if quoted_out > 0 else 0
 ```
 
 ```python
@@ -952,6 +993,7 @@ from loguru import logger
 from typing import Any
 from solana.rpc.api import Client
 from solana.rpc.types import TxOpts
+from solana.system_program import ComputeBudgetProgram
 from solana.transaction import Transaction
 from solana.system_program import TransferParams, transfer
 from src.solana.keypair_io import load_keypair_from_file
@@ -976,10 +1018,10 @@ class SolanaClient:
         self.rpc_url = rpc_url or active_rpc or CFG.rpc_primary
         self.client = Client(self.rpc_url)
         logger.info(f"[SolanaClient] RPC={self.rpc_url}")
- # --- helpers ------------------------------------------------------------
+
+    # --- helpers ------------------------------------------------------------
     @staticmethod
     def _resp_ok(resp: Any) -> bool:
-        # Accept both dict and typed responses
         if resp is None:
             return False
         if hasattr(resp, "is_err"):
@@ -990,21 +1032,29 @@ class SolanaClient:
 
     @staticmethod
     def _balance_from_resp(resp: Any) -> int:
-        """
-        Return lamports from get_balance response, tolerant of response shape.
-        """
         if hasattr(resp, "value"):
             try:
                 return int(resp.value)
             except Exception:
                 pass
         if isinstance(resp, dict):
-            # {'result': {'value': 123}, ...}
             try:
                 return int(resp.get("result", {}).get("value"))
             except Exception:
                 pass
         raise RuntimeError(f"Unexpected get_balance response: {resp}")
+
+    @staticmethod
+    def _priority_ixs(cu_limit: int = 1_400_000, price_micro_lamports: int = 0):
+        """
+        Compute-budget Ixs:
+          - cu_limit: max compute units the tx can consume
+          - price_micro_lamports: *micro-lamports per CU* (priority fee). 0 disables priority.
+        """
+        ixs = [ComputeBudgetProgram.set_compute_unit_limit(cu_limit)]
+        if price_micro_lamports > 0:
+            ixs.append(ComputeBudgetProgram.set_compute_unit_price(price_micro_lamports))
+        return ixs
 
     def get_balance(self, wallet_keyfile: str) -> float:
         kp = load_keypair_from_file(wallet_keyfile)
@@ -1016,18 +1066,27 @@ class SolanaClient:
         logger.debug(f"[balance] {kp.pubkey()} = {sol:.9f} SOL")
         return sol
 
-    def transfer(self, src_keyfile: str, dst_addr: str, amount_sol: float) -> TxResult:
+    def transfer(
+        self,
+        src_keyfile: str,
+        dst_addr: str,
+        amount_sol: float,
+        *,
+        priority_micro_lamports: int = 0,   # <<< set >0 to enable priority
+        cu_limit: int = 1_400_000,
+        skip_preflight: bool = True,        # <<< safer against MEV leakage
+        max_retries: int = 3,
+    ) -> TxResult:
         if amount_sol <= 0:
             raise ValueError("amount_sol must be > 0")
 
         kp = load_keypair_from_file(src_keyfile)
         lamports = int(amount_sol * LAMPORTS_PER_SOL)
 
-        # Recent blockhash
+        # blockhash
         bh = self.client.get_latest_blockhash()
         if not self._resp_ok(bh):
             raise RuntimeError(f"get_latest_blockhash error: {bh}")
-        # Try typed first, fallback to dict
         try:
             bhash = bh.value.blockhash
         except Exception:
@@ -1036,12 +1095,20 @@ class SolanaClient:
             raise RuntimeError(f"Could not parse latest blockhash: {bh}")
 
         to_pub = Pubkey.from_string(dst_addr)
-        ix = transfer(TransferParams(from_pubkey=kp.pubkey(), to_pubkey=to_pub, lamports=lamports))
+
+        # Build transaction with priority compute-budget Ixs FIRST
         tx = Transaction(recent_blockhash=bhash, fee_payer=kp.pubkey())
-        tx.add(ix)
+        for ix in self._priority_ixs(cu_limit=cu_limit, price_micro_lamports=priority_micro_lamports):
+            tx.add(ix)
+
+        # Your real instruction(s)
+        tx.add(transfer(TransferParams(from_pubkey=kp.pubkey(), to_pubkey=to_pub, lamports=lamports)))
 
         # Send + confirm
-        resp = self.client.send_transaction(tx, kp, opts=TxOpts(skip_preflight=False, max_retries=3))
+        resp = self.client.send_transaction(
+            tx, kp,
+            opts=TxOpts(skip_preflight=skip_preflight, max_retries=max_retries)
+        )
         if not self._resp_ok(resp):
             raise RuntimeError(f"send_transaction error: {resp}")
         try:
@@ -1059,7 +1126,6 @@ class SolanaClient:
         return TxResult(sig=signature)
 
     def burn_wallet(self, key_path: str):
-        # purely a file delete (WalletManager handles actual burn).
         logger.warning(f"Burn wallet called for {key_path} (file deletion handled elsewhere).")
 
 ```
@@ -1189,22 +1255,47 @@ class DexClient:
 
 ```python
 # src/dex/swapper.py
-from .client import DexClient, SwapAlloc
 from loguru import logger
 from src.core.config import CFG
+from src.solana.client import SolanaClient
+from .client import DexClient, SwapAlloc
+
 
 class Swapper:
-    def __init__(self, dex:DexClient):
+    def __init__(self, dex: DexClient):
         self.dex = dex
 
-    def swap_chunks(self, wallet:str, total_sol:float):
-        remaining = total_sol
+    def swap_chunks(self, wallet: str, total_sol: float):
+        """
+        Split a total SOL amount into chunks and swap to the target allocation.
+        Uses DEX-swap slippage and (by default) NO priority tip for sweeps.
+        """
+        remaining = float(total_sol)
         alloc = SwapAlloc(CFG.dex.splits.btc, CFG.dex.splits.eth, CFG.dex.splits.xrp)
+
+        # Compute priority price for *sweeps* (likely 0.0 SOL → micro price = 0)
+        price_micro = SolanaClient.price_for_target_priority_sol(
+            target_priority_sol=CFG.priority.dex_swap_priority_sol,   # 0.0 -> no tip
+            estimated_cu=CFG.priority.estimated_swap_cu,
+        )
+        slip_bps = CFG.slippage.dex_swap_slippage_bps
+
         while remaining > 0:
             chunk = min(CFG.dex.chunk_size_sol, remaining)
-            self.dex.swap_sol_to_alloc(wallet, chunk, alloc)
+
+            # Hand both slippage and priority into the DexClient so it can
+            # add min_out & compute budget ixs correctly per transaction.
+            self.dex.swap_sol_to_alloc(
+                wallet=wallet,
+                amount_sol=chunk,
+                alloc=alloc,
+                slippage_bps=slip_bps,
+                priority_micro_lamports=price_micro,
+            )
+
             remaining -= chunk
-            logger.info(f"Chunk complete, remaining {remaining} SOL")
+            logger.info(f"[swapper] chunk={chunk} SOL done; remaining={remaining} SOL")
+
 ```
 
 ---
@@ -1564,8 +1655,6 @@ class WalletWatcher:
 
         return None
 
-
-
 ```
 
 ```python
@@ -1588,35 +1677,154 @@ CupesyTPSL = TrailingExit(0.20, 0.00001)
 
 ```python
 # src/trading/copier.py
+# src/trading/copier.py
+from __future__ import annotations
+
 from loguru import logger
+from src.core.config import CFG
 from src.core.state import State
+from src.solana.client import SolanaClient
+from src.utils.slippage import apply_slippage_min_out
+
+LAMPORTS_PER_SOL = 1_000_000_000
+
 
 class Copier:
-    def __init__(self, trade_size_sol:float, default_role:str="burner"):
-        self.size = trade_size_sol
+    def __init__(self, trade_size_sol: float, default_role: str = "burner"):
+        self.size = float(trade_size_sol)
         self.role = default_role
         self.state = State()
+        # If you use dedicated DEX clients, init here:
+        # from src.dex.jup_client import JupiterClient
+        # self.jup = JupiterClient(rpc=CFG.rpc_primary)
+        # from src.dex.amm_client import AmmClient
+        # self.amm = AmmClient(rpc=CFG.rpc_primary)
 
-    def can_buy(self, token_mint:str, role:str|None=None) -> bool:
+    # ------------------------------------------------------------------ #
+    # Public
+    # ------------------------------------------------------------------ #
+    def execute_copy_trade(self, market: str, token_mint: str, role: str | None = None) -> bool:
+        """
+        Places a first-time BUY for a token when a leader signal is seen.
+        Route: SOL -> token
+        Slippage: CFG.slippage.copytrade_slippage_bps
+        Priority tip: CFG.priority.copytrade_priority_sol (converted to micro-lamports/CU)
+        """
+        r = role or self.role
+        if not self.can_buy(token_mint, r):
+            return False
+
+        amount_in_lamports = int(self.size * LAMPORTS_PER_SOL)
+
+        # 1) Quote SOL -> token
+        quote = self._quote_sol_to_token(token_mint, amount_in_lamports)
+        if not quote or int(quote.get("out_amount", 0)) <= 0:
+            logger.warning(f"[copier] No route/quote for token={token_mint}")
+            return False
+
+        quoted_out_amount = int(quote["out_amount"])  # token (smallest units)
+
+        # 2) Slippage guard (copy-trade)
+        min_out = apply_slippage_min_out(
+            quoted_out=quoted_out_amount,
+            slippage_bps=CFG.slippage.copytrade_slippage_bps,
+        )
+
+        # 3) Priority fee (target SOL -> per-CU price)
+        price_micro = SolanaClient.price_for_target_priority_sol(
+            target_priority_sol=CFG.priority.copytrade_priority_sol,
+            estimated_cu=CFG.priority.estimated_swap_cu,
+        )
+
+        # 4) Send swap via chosen path
+        try:
+            if market.lower() == "jupiter":
+                # Example if you build/send locally:
+                # payload = {..., "slippageBps": CFG.slippage.copytrade_slippage_bps, ...}
+                # tx_sig = self.jup.swap(payload, priority_micro_lamports=price_micro, skip_preflight=True)
+                tx_sig = self._send_via_jupiter_stub(
+                    token_mint=token_mint,
+                    amount_in_lamports=amount_in_lamports,
+                    min_out=min_out,
+                    quote=quote,
+                    priority_micro_lamports=price_micro,
+                )
+            else:
+                # Direct AMM path:
+                # ix = self.amm.build_swap_ix(..., amount_in=amount_in_lamports, min_out=min_out, ...)
+                # tx_sig = self.amm.send(ix, priority_micro_lamports=price_micro, skip_preflight=True)
+                tx_sig = self._send_via_amm_stub(
+                    token_mint=token_mint,
+                    amount_in_lamports=amount_in_lamports,
+                    min_out=min_out,
+                    quote=quote,
+                    priority_micro_lamports=price_micro,
+                )
+        except Exception as e:
+            logger.exception(f"[copier] Swap failed for {token_mint}: {e}")
+            return False
+
+        logger.info(
+            f"[copier] BUY SOL→{token_mint} role={r} in={amount_in_lamports} "
+            f"quote_out={quoted_out_amount} min_out={min_out} slip_bps={CFG.slippage.copytrade_slippage_bps} "
+            f"priority_micro={price_micro} tx={tx_sig}"
+        )
+
+        # 5) Mark token as bought for this role/burner
+        self.record_buy(token_mint, r)
+        return True
+
+    # ------------------------------------------------------------------ #
+    # State helpers
+    # ------------------------------------------------------------------ #
+    def can_buy(self, token_mint: str, role: str | None = None) -> bool:
         r = role or self.role
         if self.state.has_bought_token(r, token_mint):
             logger.info(f"[copier] SKIP duplicate buy for {token_mint} (role={r})")
             return False
         return True
 
-    def record_buy(self, token_mint:str, role:str|None=None) -> None:
+    def record_buy(self, token_mint: str, role: str | None = None) -> None:
         r = role or self.role
         self.state.record_token_buy(r, token_mint)
 
-    def execute_copy_trade(self, market:str, token_mint:str, role:str|None=None):
-        r = role or self.role
-        if not self.can_buy(token_mint, r):
-            return False  # no-op
-        # TODO: real DEX buy goes here
-        logger.info(f"Executing FIRST-TIME buy on {market} token={token_mint} with {self.size} SOL (role={r})")
-        # If swap succeeds:
-        self.record_buy(token_mint, r)
-        return True
+    # ------------------------------------------------------------------ #
+    # Quoting / sending (replace stubs with real implementations)
+    # ------------------------------------------------------------------ #
+    def _quote_sol_to_token(self, token_mint: str, amount_in_lamports: int) -> dict:
+        """
+        Return dict with at least:
+          { "out_amount": <int>, "raw": <jupiter_quote_json or None>, "route_meta": <amm route data or None> }
+        """
+        # TODO: implement real quoting.
+        return {"out_amount": 100_000_000, "raw": None, "route_meta": None}
+
+    def _trader_pubkey(self, role: str):
+        """Return the pubkey of the wallet that sends the copy trade (e.g., burner)."""
+        return "BurnerPubkeyGoesHere"
+
+    # ----- stub senders (accept priority_micro_lamports now) -----
+    def _send_via_jupiter_stub(
+        self,
+        token_mint: str,
+        amount_in_lamports: int,
+        min_out: int,
+        quote: dict,
+        priority_micro_lamports: int,
+    ) -> str:
+        # Replace with real Jupiter send; insert compute budget ixs with priority_micro_lamports
+        return "jup_tx_sig_stub"
+
+    def _send_via_amm_stub(
+        self,
+        token_mint: str,
+        amount_in_lamports: int,
+        min_out: int,
+        quote: dict,
+        priority_micro_lamports: int,
+    ) -> str:
+        # Replace with building AMM ix + send via your Solana client (adds compute budget ixs)
+        return "amm_tx_sig_stub"
 
 ```
 
