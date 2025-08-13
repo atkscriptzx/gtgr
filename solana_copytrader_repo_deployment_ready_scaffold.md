@@ -82,6 +82,8 @@ DEX_ENDPOINT=https://quote-api.jup.ag/v6
 SWAP_SPLIT_BTC=0.50
 SWAP_SPLIT_ETH=0.25
 SWAP_SPLIT_XRP=0.25
+VAULT_SPLIT_HOT=0.05
+VAULT_SPLIT_COLD=0.95
 CHUNK_SIZE_SOL=50
 CHUNK_DELAY_S_MIN=5
 CHUNK_DELAY_S_MAX=10
@@ -637,6 +639,21 @@ def _env_int(name: str, default: int) -> int:
         return int(float(os.getenv(name, default)))  # allow "50.0"
     except Exception:
         return int(default)
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, default))
+    except Exception:
+        return float(default)
+
+class VaultSplitCfg(BaseModel):
+    hot:  float = Field(default_factory=lambda: _env_float("VAULT_SPLIT_HOT", 0.05))
+    cold: float = Field(default_factory=lambda: _env_float("VAULT_SPLIT_COLD", 0.95))
+
+class AppCfg(BaseModel):
+    ...
+    vault_split: VaultSplitCfg = Field(default_factory=VaultSplitCfg)
+
 
 def _env_list(name: str) -> list[str]:
     v = os.getenv(name, "")
@@ -1524,24 +1541,43 @@ from src.solana.client import SolanaClient
 from src.solana.wallet_manager import WalletManager
 from src.dex.client import SwapAlloc
 from src.flow.proxies import transfer_via_proxies
-
++from src.core.keystore import KeyStore
++from src.dex.swapper import Swapper
++from src.flow.collector import route_profits_to_vaults  
 
 
 class CollectorFlow:
     def __init__(self, sol:SolanaClient, dex:DexClient, wm:WalletManager, collector_keyfile:str):
         self.sol=sol; self.dex=dex; self.wm=wm; self.collector_keyfile=collector_keyfile
 
-    def run_0450(self):
+   # 1) Get collector balance
         bal = self.sol.get_balance(self.collector_keyfile)
-        remaining = bal
+        if bal <= 0:
+            logger.info("Collector empty; nothing to route.")
+        else:
+            # 2) Compute 95% (COLD) / 5% (HOT) split
+            amt_hot  = round(bal * 0.05, 9)
+            amt_cold = max(0.0, bal - amt_hot)
+            logger.info(f"[vault split] HOT={amt_hot} SOL  COLD={amt_cold} SOL (from {bal} SOL)")
 
-        alloc = SwapAlloc(CFG.dex.splits.btc, CFG.dex.splits.eth, CFG.dex.splits.xrp)
+            # 3) Route via two-hop proxies to HOT and COLD vault wallets
+            route_profits_to_vaults(amt_hot, amt_cold)
 
-        while remaining > 0:
-            chunk = min(CFG.dex.chunk_size_sol, remaining)
-            self.dex.swap_sol_to_alloc(self.collector_keyfile, chunk, alloc)
-            remaining -= chunk
-            jitter(CFG.dex.delay_s_min, CFG.dex.delay_s_max)
+            # 4) Optional: perform swaps FROM the vault wallets now
+            try:
+                swapper = Swapper(self.dex)
+                kf_hot  = str(KeyStore.path(CFG.HOLD_HOT_KEY))
+                kf_cold = str(KeyStore.path(CFG.HOLD_COLD_KEY))
+                bal_hot  = self.sol.get_balance(kf_hot)
+                bal_cold = self.sol.get_balance(kf_cold)
+                if bal_hot > 0:
+                    logger.info(f"[vault swap] HOT vault swapping {bal_hot} SOL")
+                    swapper.swap_chunks(wallet=kf_hot, total_sol=bal_hot)
+                if bal_cold > 0:
+                    logger.info(f"[vault swap] COLD vault swapping {bal_cold} SOL")
+                    swapper.swap_chunks(wallet=kf_cold, total_sol=bal_cold)
+            except Exception as e:
+                logger.warning(f"[vault swap] Skipping vault swaps: {e}")
 
         logger.info("Collector emptied to DEX; burn & recreate")
         self.wm.replace_wallet("collector", getattr(CFG, "COLLECTOR_KEY", "collector.json"))
@@ -1552,7 +1588,7 @@ class CollectorFlow:
         self.wm.replace_wallet("proxy2", p2)
         logger.info("Proxy wallets burned & regenerated")
 
-	def route_profits_to_vaults(sol_amount_for_a: float, sol_amount_for_b: float):
+	def route_profits_to_vaults(sol_amount_for_a: float, sol_amount_for_b: float) -> None:
 	    # Route 1 → Vault A via Proxy3/Proxy4
     transfer_via_proxies(
         hops=[CFG.PROXY3_KEY, CFG.PROXY4_KEY],
