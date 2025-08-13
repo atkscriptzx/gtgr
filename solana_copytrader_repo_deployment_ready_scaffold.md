@@ -184,6 +184,20 @@ dependencies = [
 line-length = 100
 ```
 
+## keys
+
+```bash
+keys/burner.json
+keys/collector.json
+keys/funder_active.json
+keys/funder_next.json
+keys/funder_standby.json
+keys/proxy1.json
+keys/proxy2.json
+keys/hold_cold.json
+keys/hold_hot.json
+```
+
 ## Scripts
 
 ```bash
@@ -437,7 +451,7 @@ After=network.target
 
 [Service]
 Type=simple
-User=ubuntu
+User=linixuser
 WorkingDirectory=/home/linuxuser/solana-copytrader
 ExecStart=/home/linuxuser/solana-copytrader/.venv/bin/python -m src.main
 Restart=always
@@ -467,7 +481,7 @@ Description=Healthcheck for CopyTrader
 
 [Service]
 Type=oneshot
-User=ubuntu
+User=linuxusee
 WorkingDirectory=/home/linuxuser/solana-copytrader
 ExecStart=/home/linuxuser/solana-copytrader/.venv/bin/python /home/linuxuser/solana-copytrader/src/utils/check_rpc_latency.py
 
@@ -704,6 +718,27 @@ from .config import CFG
 Path(CFG.log_dir).mkdir(parents=True, exist_ok=True)
 _ = logger.add(Path(CFG.log_dir, 'copytrader.log'), rotation='10 MB', retention='14 days', compression='zip', enqueue=True, backtrace=True, diagnose=False)
 
+```
+
+```python
+# src/core/keystore.py
+from pathlib import Path
+
+class KeyStore:
+    @staticmethod
+    def path(key_name: str) -> Path:
+        """
+        Resolves keyfile path. Uses repo's 'keys/' folder if relative,
+        otherwise treats as absolute.
+        """
+        p = Path(key_name)
+        if not p.is_absolute():
+            p = Path("keys") / p
+        full_path = p.resolve()
+
+        if not full_path.exists():
+            raise FileNotFoundError(f"Keyfile not found: {full_path}")
+        return full_path
 ```
 
 ```python
@@ -1276,20 +1311,21 @@ class DexClient:
     def __init__(self, endpoint:str):
         self.endpoint = endpoint
 
-	def swap_sol_to_alloc(
-	    self,
-	    from_wallet: str,
-	    amount_sol: float,
-	    alloc: SwapAlloc,
-	    *,
-	    slippage_bps: int = 0,
-	    priority_micro_lamports: int = 0,
-	) -> dict:
-	    logger.info(
-	        f"Swapping {amount_sol} SOL to BTC:{alloc.btc} ETH:{alloc.eth} XRP:{alloc.xrp} "
-	        f"(slip={slippage_bps}bps, priority_micro={priority_micro_lamports})"
-	    )
-	    return {"btc": amount_sol*alloc.btc, "eth": amount_sol*alloc.eth, "xrp": amount_sol*alloc.xrp}
+    def swap_sol_to_alloc(
+        self,
+        from_wallet: str,
+        amount_sol: float,
+        alloc: SwapAlloc,
+        *,
+        slippage_bps: int = 0,
+        priority_micro_lamports: int = 0,
+    ) -> dict:
+        logger.info(
+            f"Swapping {amount_sol} SOL to BTC:{alloc.btc} ETH:{alloc.eth} XRP:{alloc.xrp} "
+            f"(slip={slippage_bps}bps, priority_micro={priority_micro_lamports})"
+        )
+        return {"btc": amount_sol*alloc.btc, "eth": amount_sol*alloc.eth, "xrp": amount_sol*xrp}
+
 
 
 ```
@@ -1412,25 +1448,26 @@ class CollectorFlow:
         self.sol=sol; self.dex=dex; self.wm=wm; self.collector_keyfile=collector_keyfile
 
     def run_0450(self):
-    bal = self.sol.get_balance(self.collector_keyfile)
-    remaining = bal
+        bal = self.sol.get_balance(self.collector_keyfile)
+        remaining = bal
 
-    alloc = SwapAlloc(CFG.dex.splits.btc, CFG.dex.splits.eth, CFG.dex.splits.xrp)
+        alloc = SwapAlloc(CFG.dex.splits.btc, CFG.dex.splits.eth, CFG.dex.splits.xrp)
 
-    while remaining > 0:
-        chunk = min(CFG.dex.chunk_size_sol, remaining)
-        self.dex.swap_sol_to_alloc(self.collector_keyfile, chunk, alloc)
-        remaining -= chunk
-        jitter(CFG.dex.delay_s_min, CFG.dex.delay_s_max)
+        while remaining > 0:
+            chunk = min(CFG.dex.chunk_size_sol, remaining)
+            self.dex.swap_sol_to_alloc(self.collector_keyfile, chunk, alloc)
+            remaining -= chunk
+            jitter(CFG.dex.delay_s_min, CFG.dex.delay_s_max)
 
-    logger.info("Collector emptied to DEX; burn & recreate")
-    self.wm.replace_wallet("collector", getattr(CFG, "COLLECTOR_KEY", "collector.json"))
+        logger.info("Collector emptied to DEX; burn & recreate")
+        self.wm.replace_wallet("collector", getattr(CFG, "COLLECTOR_KEY", "collector.json"))
 
-    p1 = getattr(CFG, "PROXY1_KEY", "proxy1.json")
-    p2 = getattr(CFG, "PROXY2_KEY", "proxy2.json")
-    self.wm.replace_wallet("proxy1", p1)
-    self.wm.replace_wallet("proxy2", p2)
-    logger.info("Proxy wallets burned & regenerated")
+        p1 = getattr(CFG, "PROXY1_KEY", "proxy1.json")
+        p2 = getattr(CFG, "PROXY2_KEY", "proxy2.json")
+        self.wm.replace_wallet("proxy1", p1)
+        self.wm.replace_wallet("proxy2", p2)
+        logger.info("Proxy wallets burned & regenerated")
+
 
 
 ```
@@ -2013,14 +2050,18 @@ import os, time
 from src.solana.client import SolanaClient
 from src.core.state import State
 from src.reports.pnl_store import get_all_time_usd
+from src.core.keystore import KeyStore
+from src.core.config import CFG
 
-ADMIN_IDS = {int(x) for x in os.getenv("TELEGRAM_ADMIN_IDS","").split(",") if x.strip().isdigit()}
-KILL_PASSPHRASE = os.getenv("KILL_SWITCH_PASSPHRASE","")
+ADMIN_IDS = {int(x) for x in os.getenv("TELEGRAM_ADMIN_IDS", "").split(",") if x.strip().isdigit()}
+KILL_PASSPHRASE = os.getenv("KILL_SWITCH_PASSPHRASE", "")
 _LAST_KILL_TS = 0.0
+
 
 def _is_admin(update: Update) -> bool:
     u = update.effective_user
     return bool(u and (u.id in ADMIN_IDS))
+
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update):
@@ -2029,15 +2070,20 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     logger.info("/status")
 
-    state = State().load()
     sol = SolanaClient()
 
     try:
-        burner_bal = sol.get_balance(state["wallets"]["burner"]["keyfile"])
-        collector_bal = sol.get_balance(state["wallets"]["collector"]["keyfile"])
-        funder_active_bal = sol.get_balance(state["wallets"]["funder_active"]["keyfile"])
-        funder_next_bal = sol.get_balance(state["wallets"]["funder_next"]["keyfile"])
-        funder_standby_bal = sol.get_balance(state["wallets"]["funder_standby"]["keyfile"])
+        kf_burner    = str(KeyStore.path(CFG.BURNER_KEY))
+        kf_collector = str(KeyStore.path(CFG.COLLECTOR_KEY))
+        kf_fa        = str(KeyStore.path(CFG.FUNDER_ACTIVE_KEY))
+        kf_fn        = str(KeyStore.path(CFG.FUNDER_NEXT_KEY))
+        kf_fs        = str(KeyStore.path(CFG.FUNDER_STANDBY_KEY))
+
+        burner_bal         = sol.get_balance(kf_burner)
+        collector_bal      = sol.get_balance(kf_collector)
+        funder_active_bal  = sol.get_balance(kf_fa)
+        funder_next_bal    = sol.get_balance(kf_fn)
+        funder_standby_bal = sol.get_balance(kf_fs)
 
         msg = (
             "💰 Balances:\n"
@@ -2052,6 +2098,7 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(msg)
 
+
 async def cmd_rotate_now(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update):
         await update.message.reply_text("Not authorized.")
@@ -2059,12 +2106,14 @@ async def cmd_rotate_now(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     logger.info("/rotate_now")
     await update.message.reply_text("Manual rotation kicked off.")
 
+
 async def cmd_sync(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update):
         await update.message.reply_text("Not authorized.")
         return
     logger.info("/sync")
     await update.message.reply_text("Health OK.")
+
 
 async def cmd_kill(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update):
@@ -2087,7 +2136,8 @@ async def cmd_kill(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     logger.warning("/kill -> kill switch (authorized)")
     await update.message.reply_text("Kill switch activated (acknowledged).")
 
-sync def cmd_vault_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+
+async def cmd_vault_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update):
         await update.message.reply_text("Not authorized.")
         return
@@ -2095,9 +2145,6 @@ sync def cmd_vault_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = State().load()
     sol = SolanaClient()
 
-    # Define which wallets count as HOT vs COLD
-    # HOT: actively used in trading / moving funds
-    # COLD: funders/standby
     wallets = state.get("wallets", {})
     hot_keys = []
     cold_keys = []
@@ -2107,7 +2154,6 @@ sync def cmd_vault_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if "funder_next" in wallets:     cold_keys.append(("Funder Next", wallets["funder_next"]["keyfile"]))
     if "funder_standby" in wallets:  cold_keys.append(("Funder Standby", wallets["funder_standby"]["keyfile"]))
 
-    # Fetch balances
     hot_lines, cold_lines = [], []
     hot_total, cold_total = 0.0, 0.0
 
@@ -2128,6 +2174,7 @@ sync def cmd_vault_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Σ TOTAL: {(hot_total + cold_total):.4f} SOL"
     )
     await update.message.reply_text(msg)
+
 
 async def cmd_atpnl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update):
