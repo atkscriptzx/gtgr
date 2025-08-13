@@ -43,15 +43,15 @@ LOG_DIR=./logs
 
 WHITELISTED_IPS=45.32.173.97
 KILL_SWITCH_ENABLED=true
-KILL_SWITCH_PASSPHRASE=change-this-now
+KILL_SWITCH_PASSPHRASE=atkansas
 
 TELEGRAM_BOT_TOKEN=8493237385:AAHHFS8MJk_IkrFTVKZel0K1xTT1htV8cS4
-TELEGRAM_CHAT_ID_MAIN=
-TELEGRAM_CHAT_ID_ALERTS=
-TELEGRAM_ADMIN_IDS=123456789
+TELEGRAM_CHAT_ID_MAIN=6120949753
+TELEGRAM_CHAT_ID_ALERTS=6120949753
+TELEGRAM_ADMIN_IDS=6120949753
 
 SOLANA_CLUSTER=mainnet
-RPC_PRIMARY=https://api.mainnet-beta.solana.com
+RPC_PRIMARY=https:[//api.mainnet-beta.solana.com](https://empty-methodical-asphalt.solana-mainnet.quiknode.pro/121047ee49945da6b0adba7cd07826e4802812c3/)
 RPC_POOL_FILE=./config/rpc_pool.txt
 RPC_LATENCY_MS_THRESHOLD=500
 
@@ -63,6 +63,10 @@ FUNDER_STANDBY_KEY=funder_standby.json
 BURNER_KEY=burner.json
 PROXY1_KEY=proxy1.json
 PROXY2_KEY=proxy2.json
+PROXY3_KEY=proxy3.json
+PROXY4_KEY=proxy4.json
+PROXY5_KEY=proxy5.json
+PROXY6_KEY=proxy6.json
 HOLD_COLD_KEY=hold_cold.json
 HOLD_HOT_KEY=hold_hot.json
 
@@ -71,10 +75,10 @@ BURNER_TARGET_SOL=16
 FORCED_DRAIN_CRON=45 4 * * *
 ROTATE_CRON=0 5 * * *
 DEX_CRON=50 4 * * *
-WATCH_ADDRESSES=WalletCupesyPubkey,WalletEurisPubkey
+WATCH_ADDRESSES= suqh5sHtr8HyJ7q8scBimULPkPpA557prMG47xCHQfK, DfMxre4cKmvogbLrPigxmibVTTQDuzjdXojWzjCXXhzj
 MAX_MARKETCAP_USD=20000
 
-DEX_ENDPOINT=https://dex.example
+DEX_ENDPOINT=https://quote-api.jup.ag/v6
 SWAP_SPLIT_BTC=0.50
 SWAP_SPLIT_ETH=0.25
 SWAP_SPLIT_XRP=0.25
@@ -92,7 +96,7 @@ USD_BASED_PNL=true
 
 TOR_ENABLED=true
 TOR_CONTROL_PORT=9051
-GPG_KEY_EMAIL=you@example.com
+GPG_KEY_EMAIL=atkan101@gmail.com
 PGP_BACKUP_ENABLED=true
 SYSTEMD_SERVICE_NAME=copytrader.service
 
@@ -194,6 +198,8 @@ keys/funder_next.json
 keys/funder_standby.json
 keys/proxy1.json
 keys/proxy2.json
+keys/proxy3.json
+keys/proxy4.json
 keys/hold_cold.json
 keys/hold_hot.json
 ```
@@ -514,6 +520,9 @@ WantedBy=timers.target
     "funder_active":    { "pubkey": "", "keyfile": "keys/funder_active.json" },
     "funder_next":      { "pubkey": "", "keyfile": "keys/funder_next.json" },
     "funder_standby":   { "pubkey": "", "keyfile": "keys/funder_standby.json" }
+	"proxy3":           { "pubkey": "", "keyfile": "keys/proxy3.json"},
+	"proxy4":           { "pubkey": "", "keyfile": "keys/proxy4.json"}
+
   },
   "last_rotation": null,
   "last_kill_switch": null
@@ -668,6 +677,15 @@ class AppCfg(BaseModel):
     FUNDER_NEXT_KEY: str = Field(default_factory=lambda: os.getenv('FUNDER_NEXT_KEY', 'funder_next.json'))
     FUNDER_STANDBY_KEY: str = Field(default_factory=lambda: os.getenv('FUNDER_STANDBY_KEY', 'funder_standby.json'))
     BURNER_KEY: str = Field(default_factory=lambda: os.getenv('BURNER_KEY', 'burner.json'))
+    PROXY1_KEY: str = Field(default_factory=lambda: os.getenv('PROXY1_KEY', 'proxy1.json'))
+    PROXY2_KEY: str = Field(default_factory=lambda: os.getenv('PROXY2_KEY', 'proxy2.json'))
+    PROXY3_KEY: str = Field(default_factory=lambda: os.getenv('PROXY3_KEY', 'proxy3.json'))
+    PROXY4_KEY: str = Field(default_factory=lambda: os.getenv('PROXY4_KEY', 'proxy4.json'))
+    PROXY5_KEY: str = Field(default_factory=lambda: os.getenv('PROXY5_KEY', 'proxy5.json'))
+    PROXY6_KEY: str = Field(default_factory=lambda: os.getenv('PROXY6_KEY', 'proxy6.json'))
+    HOLD_HOT_KEY: str = Field(default_factory=lambda: os.getenv('VAULT_A_KEY', 'vault_a.json'))
+    VHOLD_COLD_KEY: str = Field(default_factory=lambda: os.getenv('VAULT_B_KEY', 'vault_b.json'))
+
     dex: DexCfg = Field(default_factory=DexCfg)
     proxy: ProxyCfg = Field(default_factory=ProxyCfg)
     trading: TradingCfg = Field(default_factory=TradingCfg)
@@ -727,18 +745,14 @@ from pathlib import Path
 class KeyStore:
     @staticmethod
     def path(key_name: str) -> Path:
-        """
-        Resolves keyfile path. Uses repo's 'keys/' folder if relative,
-        otherwise treats as absolute.
-        """
         p = Path(key_name)
         if not p.is_absolute():
-            p = Path("keys") / p
-        full_path = p.resolve()
+            p = Path("keys") / p  # default repo-relative keys folder
+        full = p.resolve()
+        if not full.exists():
+            raise FileNotFoundError(f"Keyfile not found: {full}")
+        return full
 
-        if not full_path.exists():
-            raise FileNotFoundError(f"Keyfile not found: {full_path}")
-        return full_path
 ```
 
 ```python
@@ -1046,6 +1060,8 @@ from src.solana.keypair_io import load_keypair_from_file
 from src.core.config import CFG
 from src.core.state import State
 from solders.pubkey import Pubkey
+from base64 import b64encode
+from solders.signature import Signature 
 
 LAMPORTS_PER_SOL = 1_000_000_000
 
@@ -1191,6 +1207,35 @@ class SolanaClient:
     def burn_wallet(self, key_path: str):
         logger.warning(f"Burn wallet called for {key_path} (file deletion handled elsewhere).")
 
+	def send_legacy_tx_bytes(self, tx_bytes: bytes, signer_keyfile: str, skip_preflight: bool = True) -> str:
+	        """
+	        Sign a legacy Transaction (bytes), then send+confirm.
+	        """
+	        kp = load_keypair_from_file(signer_keyfile)
+	        tx = Transaction.deserialize(tx_bytes)
+	        tx.sign(kp)
+	
+	        raw = bytes(tx.serialize())  # re-serialize with signature
+	        resp = self.client.send_raw_transaction(raw, opts=TxOpts(skip_preflight=skip_preflight, max_retries=3))
+	        if not self._resp_ok(resp):
+	            raise RuntimeError(f"send_raw_transaction error: {resp}")
+	        try:
+	            sig = str(resp.value)
+	        except Exception:
+	            sig = str(resp.get("result"))
+	
+	        try:
+	            conf = self.client.confirm_transaction(Signature.from_string(sig))
+	            if not self._resp_ok(conf):
+	                logger.warning(f"[jup] confirm error: {conf}")
+	        except Exception as e:
+	            logger.warning(f"[jup] confirm exception: {e}")
+	        return sig
+	
+	    @staticmethod
+	    def lamports_from_sol(amount_sol: float) -> int:
+	        return int(amount_sol * 1_000_000_000)
+
 ```
 
 ```python
@@ -1331,6 +1376,53 @@ class DexClient:
 ```
 
 ```python
+# src/dex/jupiter.py
+from __future__ import annotations
+import requests
+from base64 import b64decode
+from loguru import logger
+
+JUP_BASE = "https://quote-api.jup.ag"
+MINT_SOL = "So11111111111111111111111111111111111111112"  # native SOL pseudo-mint
+
+class JupiterClient:
+    def __init__(self, session: requests.Session | None = None):
+        self.sess = session or requests.Session()
+
+    def quote(self, input_mint: str, output_mint: str, amount_in: int, slippage_bps: int) -> dict:
+        q = {
+            "inputMint": input_mint,
+            "outputMint": output_mint,
+            "amount": str(amount_in),
+            "slippageBps": int(slippage_bps),
+            "swapMode": "ExactIn",
+            "onlyDirectRoutes": False,
+        }
+        r = self.sess.get(f"{JUP_BASE}/v6/quote", params=q, timeout=10)
+        r.raise_for_status()
+        return r.json()
+
+    def build_swap_tx(self, quote_json: dict, user_pubkey: str, prioritization_lamports: int = 0) -> bytes:
+        """
+        Ask Jupiter to build a *legacy* transaction we can sign locally.
+        Returns the raw base64 decoded bytes of the transaction (unsigned).
+        """
+        payload = {
+            "quoteResponse": quote_json,
+            "userPublicKey": user_pubkey,
+            "wrapAndUnwrapSol": True,
+            "asLegacyTransaction": True,                # easier to sign with solana-py Transaction
+            # Let Jupiter include a total tip in lamports (simpler than per-CU math here)
+            "prioritizationFeeLamports": int(prioritization_lamports) if prioritization_lamports > 0 else 0,
+            # "dynamicComputeUnitLimit": True,          # optional
+        }
+        r = self.sess.post(f"{JUP_BASE}/v6/swap", json=payload, timeout=15)
+        r.raise_for_status()
+        swap_tx_b64 = r.json()["swapTransaction"]
+        return b64decode(swap_tx_b64)
+```
+
+```python
 # src/dex/swapper.py
 from loguru import logger
 from src.core.config import CFG
@@ -1372,6 +1464,11 @@ class Swapper:
 
             remaining -= chunk
             logger.info(f"[swapper] chunk={chunk} SOL done; remaining={remaining} SOL")
+
+			# After swap into BTC/ETH/XRP
+			self.proxy_transfer(wallet_from="collector", wallet_to="proxy3")
+			self.proxy_transfer(wallet_from="proxy3", wallet_to="proxy4")
+			self.proxy_transfer(wallet_from="proxy4", wallet_to="vault_wallet")
 
 ```
 
@@ -1441,6 +1538,8 @@ from src.dex.client import DexClient
 from src.solana.client import SolanaClient
 from src.solana.wallet_manager import WalletManager
 from src.dex.client import SwapAlloc
+from src.flow.proxies import transfer_via_proxies
+
 
 
 class CollectorFlow:
@@ -1468,7 +1567,28 @@ class CollectorFlow:
         self.wm.replace_wallet("proxy2", p2)
         logger.info("Proxy wallets burned & regenerated")
 
-
+	def route_profits_to_vaults(sol_amount_for_a: float, sol_amount_for_b: float):
+	    # Route 1 → Vault A via Proxy3/Proxy4
+	    transfer_via_proxies(
+	        hops=[CFG.PROXY3_KEY, CFG.PROXY4_KEY],
+	        src_key=CFG.COLLECTOR_KEY,
+	        dst_key=CFG.VAULT_A_KEY,
+	        amount_sol=sol_amount_for_a,
+	        delay_s_min=CFG.proxy.delay_s_min,
+	        delay_s_max=CFG.proxy.delay_s_max,
+	        burn_and_regen_on_use=True,
+	    )
+	
+	    # Route 2 → Vault B via Proxy5/Proxy6
+	    transfer_via_proxies(
+	        hops=[CFG.PROXY5_KEY, CFG.PROXY6_KEY],
+	        src_key=CFG.COLLECTOR_KEY,
+	        dst_key=CFG.VAULT_B_KEY,
+	        amount_sol=sol_amount_for_b,
+	        delay_s_min=CFG.proxy.delay_s_min,
+	        delay_s_max=CFG.proxy.delay_s_max,
+	        burn_and_regen_on_use=True,
+	    )
 
 ```
 
@@ -1484,6 +1604,8 @@ from src.core.state import State
 from src.core.keystore import KeyStore
 from src.core.config import CFG
 from src.flow.rotation import DailyRotation
+from src.flow.proxies import transfer_via_proxies
+from src.core.config import CFG
 
 class FunderRotation:
     def __init__(self, sol:SolanaClient, wm:WalletManager, active_kf:str, next_kf:str, standby_kf:str, collector_addr:str):
@@ -1539,6 +1661,18 @@ class FunderRotation:
         kp = load_keypair_from_file(KeyStore.path(keyfile))
         return str(kp.pubkey())
 
+	def fund_funder_from_collector(amount_sol: float):
+	    transfer_via_proxies(
+	        hops=[CFG.PROXY1_KEY, CFG.PROXY2_KEY],
+	        src_key=CFG.COLLECTOR_KEY,
+	        dst_key=CFG.FUNDER_ACTIVE_KEY,
+	        amount_sol=amount_sol,
+	        delay_s_min=CFG.proxy.delay_s_min,
+	        delay_s_max=CFG.proxy.delay_s_max,
+	        burn_and_regen_on_use=True,
+	    )
+
+
 ```
 
 ```python
@@ -1569,6 +1703,7 @@ from src.flow.collector import CollectorFlow
 from src.flow.funders import FunderRotation
 from src.dex.client import DexClient
 from src.core.keystore import KeyStore
+from time import sleep
 
 class DailyRotation:
     def execute(self):
@@ -1610,6 +1745,70 @@ class DailyRotation:
         fr.ensure_active_has_5()
         logger.info("✅ Daily rotation finished.")
 
+	def transfer_via_proxies(
+	    *,
+	    hops: list[str],          # list of key names from CFG, in order. e.g. [CFG.PROXY1_KEY, CFG.PROXY2_KEY]
+	    src_key: str,             # key name (from CFG) of the sender wallet
+	    dst_key: str,             # key name (from CFG) of the final receiver wallet
+	    amount_sol: float,
+	    delay_s_min: int = 0,
+	    delay_s_max: int = 0,
+	    burn_and_regen_on_use: bool = True,
+	):
+	    """
+	    Transfer amount_sol from src -> hops... -> dst with NO priority fee, burning each proxy after use.
+	    """
+	    wm = WalletManager()
+	    sol = SolanaClient()
+	
+	    path = [src_key] + hops + [dst_key]
+	    resolved = [str(KeyStore.path(k)) for k in path]
+	
+	    # sequential L1 transfers
+	    for i in range(len(resolved) - 1):
+	        src_kf = resolved[i]
+	        dst_kf = resolved[i + 1]
+	        # You need the destination pubkey string; WalletManager can give it from keyfile
+	        dst_pub = wm.pubkey_from_keyfile(dst_kf)
+	
+	        logger.info(f"[proxy] {src_kf} -> {dst_pub} amount={amount_sol} SOL (no priority)")
+	        sol.transfer(
+	            src_keyfile=src_kf,
+	            dst_addr=dst_pub,
+	            amount_sol=amount_sol,
+	            priority_micro_lamports=0,   # <-- NO PRIORITY FEE
+	            skip_preflight=True,
+	        )
+	
+	        # burn+regen the just-used proxy (not the initial src or final dst)
+	        if burn_and_regen_on_use and i > 0 and i < len(resolved) - 1:
+	            # i points to the proxy we just used as the *destination* of the previous hop.
+	            # Here we burn the wallet at index i (just-used proxy) and recreate it.
+	            # Figure out its CFG key name to call replace_wallet with the correct logical role.
+	            used_cfg_key = hops[i - 1]  # map index back into hops list
+	            logical_name = _logical_role_from_cfg_key(used_cfg_key)  # e.g. "proxy1"
+	            logger.info(f"[proxy] burn+regen {logical_name}")
+	            wm.replace_wallet(logical_name, used_cfg_key)
+	
+	        # optional jitter
+	        if delay_s_min or delay_s_max:
+	            import random
+	            sleep(random.uniform(delay_s_min, delay_s_max))
+	
+	
+	def _logical_role_from_cfg_key(cfg_key: str) -> str:
+	    """
+	    Derive a stable role name from a cfg key filename.
+	    If your WM expects specific role names ('proxy1', 'proxy2', ...), map them here.
+	    """
+	    name = cfg_key.lower()
+	    if "proxy1" in name: return "proxy1"
+	    if "proxy2" in name: return "proxy2"
+	    if "proxy3" in name: return "proxy3"
+	    if "proxy4" in name: return "proxy4"
+	    if "proxy5" in name: return "proxy5"
+	    if "proxy6" in name: return "proxy6"
+	    return "proxy"
 ```
 
 ---
@@ -1749,14 +1948,16 @@ CupesyTPSL = TrailingExit(0.20, 0.00001)
 
 ```python
 # src/trading/copier.py
-# src/trading/copier.py
 from __future__ import annotations
-
 from loguru import logger
 from src.core.config import CFG
 from src.core.state import State
 from src.solana.client import SolanaClient
 from src.utils.slippage import apply_slippage_min_out
+from src.dex.jupiter import JupiterClient, MINT_SOL
+from src.core.keystore import KeyStore
+from src.core.wallet_manager import WalletManager
+
 
 LAMPORTS_PER_SOL = 1_000_000_000
 
@@ -1775,128 +1976,63 @@ class Copier:
     # ------------------------------------------------------------------ #
     # Public
     # ------------------------------------------------------------------ #
+    def _trader_pubkey(self, role: str) -> str:
+        # use the burner wallet pubkey for copy-trades (or whatever role you pass)
+        return self.wm.pubkey_of(role)  # must return base58 str
+
+    def _trader_keyfile(self, role: str) -> str:
+        # resolve keyfile path (burner.json etc.) from env/CFG via KeyStore
+        if role == "burner":
+            return str(KeyStore.path(CFG.BURNER_KEY))
+        # add other roles if needed
+        raise ValueError(f"Unknown role {role}")
+
+    def _quote_sol_to_token(self, token_mint: str, amount_in_lamports: int) -> dict:
+        # Jupiter wants SOL pseudo-mint for input; token_mint from your signal/resolve
+        return self.jup.quote(MINT_SOL, token_mint, amount_in_lamports, CFG.slippage.copytrade_slippage_bps)
+
+    def _send_via_jupiter(self, role: str, quote_json: dict, priority_sol: float) -> str:
+        prioritization_lamports = self.sol.lamports_from_sol(priority_sol) if priority_sol > 0 else 0
+        user_pub = self._trader_pubkey(role)
+        tx_bytes = self.jup.build_swap_tx(quote_json, user_pubkey=user_pub, prioritization_lamports=prioritization_lamports)
+        sig = self.sol.send_legacy_tx_bytes(tx_bytes, signer_keyfile=self._trader_keyfile(role), skip_preflight=True)
+        return sig
+
     def execute_copy_trade(self, market: str, token_mint: str, role: str | None = None) -> bool:
-        """
-        Places a first-time BUY for a token when a leader signal is seen.
-        Route: SOL -> token
-        Slippage: CFG.slippage.copytrade_slippage_bps
-        Priority tip: CFG.priority.copytrade_priority_sol (converted to micro-lamports/CU)
-        """
         r = role or self.role
         if not self.can_buy(token_mint, r):
             return False
 
         amount_in_lamports = int(self.size * LAMPORTS_PER_SOL)
 
-        # 1) Quote SOL -> token
+        # 1) Quote
         quote = self._quote_sol_to_token(token_mint, amount_in_lamports)
-        if not quote or int(quote.get("out_amount", 0)) <= 0:
+        out_amount = int(quote.get("outAmount") or quote.get("out_amount") or 0)
+        if out_amount <= 0:
             logger.warning(f"[copier] No route/quote for token={token_mint}")
             return False
 
-        quoted_out_amount = int(quote["out_amount"])  # token (smallest units)
+        # 2) minOut is already handled by Jupiter via slippageBps we passed in the quote request.
+        # (If you still want a local guard, you can compute it; Jupiter enforces slippageBps in the swap itself.)
 
-        # 2) Slippage guard (copy-trade)
-        min_out = apply_slippage_min_out(
-            quoted_out=quoted_out_amount,
-            slippage_bps=CFG.slippage.copytrade_slippage_bps,
-        )
+        # 3) Priority (target total lamports via Jupiter param)
+        priority_sol = float(CFG.priority.copytrade_priority_sol)
 
-        # 3) Priority fee (target SOL -> per-CU price)
-        price_micro = SolanaClient.price_for_target_priority_sol(
-            target_priority_sol=CFG.priority.copytrade_priority_sol,
-            estimated_cu=CFG.priority.estimated_swap_cu,
-        )
-
-        # 4) Send swap via chosen path
+        # 4) Build+send
         try:
-            if market.lower() == "jupiter":
-                # Example if you build/send locally:
-                # payload = {..., "slippageBps": CFG.slippage.copytrade_slippage_bps, ...}
-                # tx_sig = self.jup.swap(payload, priority_micro_lamports=price_micro, skip_preflight=True)
-                tx_sig = self._send_via_jupiter_stub(
-                    token_mint=token_mint,
-                    amount_in_lamports=amount_in_lamports,
-                    min_out=min_out,
-                    quote=quote,
-                    priority_micro_lamports=price_micro,
-                )
-            else:
-                # Direct AMM path:
-                # ix = self.amm.build_swap_ix(..., amount_in=amount_in_lamports, min_out=min_out, ...)
-                # tx_sig = self.amm.send(ix, priority_micro_lamports=price_micro, skip_preflight=True)
-                tx_sig = self._send_via_amm_stub(
-                    token_mint=token_mint,
-                    amount_in_lamports=amount_in_lamports,
-                    min_out=min_out,
-                    quote=quote,
-                    priority_micro_lamports=price_micro,
-                )
+            tx_sig = self._send_via_jupiter(r, quote, priority_sol)
         except Exception as e:
             logger.exception(f"[copier] Swap failed for {token_mint}: {e}")
             return False
 
         logger.info(
             f"[copier] BUY SOL→{token_mint} role={r} in={amount_in_lamports} "
-            f"quote_out={quoted_out_amount} min_out={min_out} slip_bps={CFG.slippage.copytrade_slippage_bps} "
-            f"priority_micro={price_micro} tx={tx_sig}"
+            f"quote_out={out_amount} slip_bps={CFG.slippage.copytrade_slippage_bps} tx={tx_sig}"
         )
-
-        # 5) Mark token as bought for this role/burner
         self.record_buy(token_mint, r)
         return True
 
-    # ------------------------------------------------------------------ #
-    # State helpers
-    # ------------------------------------------------------------------ #
-    def can_buy(self, token_mint: str, role: str | None = None) -> bool:
-        r = role or self.role
-        if self.state.has_bought_token(r, token_mint):
-            logger.info(f"[copier] SKIP duplicate buy for {token_mint} (role={r})")
-            return False
-        return True
-
-    def record_buy(self, token_mint: str, role: str | None = None) -> None:
-        r = role or self.role
-        self.state.record_token_buy(r, token_mint)
-
-    # ------------------------------------------------------------------ #
-    # Quoting / sending (replace stubs with real implementations)
-    # ------------------------------------------------------------------ #
-    def _quote_sol_to_token(self, token_mint: str, amount_in_lamports: int) -> dict:
-        """
-        Return dict with at least:
-          { "out_amount": <int>, "raw": <jupiter_quote_json or None>, "route_meta": <amm route data or None> }
-        """
-        # TODO: implement real quoting.
-        return {"out_amount": 100_000_000, "raw": None, "route_meta": None}
-
-    def _trader_pubkey(self, role: str):
-        """Return the pubkey of the wallet that sends the copy trade (e.g., burner)."""
-        return "BurnerPubkeyGoesHere"
-
-    # ----- stub senders (accept priority_micro_lamports now) -----
-    def _send_via_jupiter_stub(
-        self,
-        token_mint: str,
-        amount_in_lamports: int,
-        min_out: int,
-        quote: dict,
-        priority_micro_lamports: int,
-    ) -> str:
-        # Replace with real Jupiter send; insert compute budget ixs with priority_micro_lamports
-        return "jup_tx_sig_stub"
-
-    def _send_via_amm_stub(
-        self,
-        token_mint: str,
-        amount_in_lamports: int,
-        min_out: int,
-        quote: dict,
-        priority_micro_lamports: int,
-    ) -> str:
-        # Replace with building AMM ix + send via your Solana client (adds compute budget ixs)
-        return "amm_tx_sig_stub"
+    # If you are standardizing on Jupiter, you can delete _send_via_amm_stub entirely.
 
 ```
 
