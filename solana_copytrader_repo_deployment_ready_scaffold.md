@@ -51,7 +51,7 @@ TELEGRAM_CHAT_ID_ALERTS=6120949753
 TELEGRAM_ADMIN_IDS=6120949753
 
 SOLANA_CLUSTER=mainnet
-RPC_PRIMARY=https:[//api.mainnet-beta.solana.com](https://empty-methodical-asphalt.solana-mainnet.quiknode.pro/121047ee49945da6b0adba7cd07826e4802812c3/)
+RPC_PRIMARY= https://empty-methodical-asphalt.solana-mainnet.quiknode.pro/121047ee49945da6b0adba7cd07826e4802812c3/
 RPC_POOL_FILE=./config/rpc_pool.txt
 RPC_LATENCY_MS_THRESHOLD=500
 
@@ -75,7 +75,7 @@ BURNER_TARGET_SOL=16
 FORCED_DRAIN_CRON=45 4 * * *
 ROTATE_CRON=0 5 * * *
 DEX_CRON=50 4 * * *
-WATCH_ADDRESSES= suqh5sHtr8HyJ7q8scBimULPkPpA557prMG47xCHQfK, DfMxre4cKmvogbLrPigxmibVTTQDuzjdXojWzjCXXhzj
+WATCH_ADDRESSES=suqh5sHtr8HyJ7q8scBimULPkPpA557prMG47xCHQfK,DfMxre4cKmvogbLrPigxmibVTTQDuzjdXojWzjCXXhzj
 MAX_MARKETCAP_USD=20000
 
 DEX_ENDPOINT=https://quote-api.jup.ag/v6
@@ -487,7 +487,7 @@ Description=Healthcheck for CopyTrader
 
 [Service]
 Type=oneshot
-User=linuxusee
+User=linuxuser
 WorkingDirectory=/home/linuxuser/solana-copytrader
 ExecStart=/home/linuxuser/solana-copytrader/.venv/bin/python /home/linuxuser/solana-copytrader/src/utils/check_rpc_latency.py
 
@@ -513,15 +513,17 @@ WantedBy=timers.target
 ```json
 #data/state.json
 {
-  "active_rpc": "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
-  "wallets": {
-    "burner":           { "pubkey": "", "keyfile": "keys/burner.json" },
-    "collector":        { "pubkey": "", "keyfile": "keys/collector.json" },
-    "funder_active":    { "pubkey": "", "keyfile": "keys/funder_active.json" },
-    "funder_next":      { "pubkey": "", "keyfile": "keys/funder_next.json" },
-    "funder_standby":   { "pubkey": "", "keyfile": "keys/funder_standby.json" }
-	"proxy3":           { "pubkey": "", "keyfile": "keys/proxy3.json"},
-	"proxy4":           { "pubkey": "", "keyfile": "keys/proxy4.json"}
+  "active_rpc": "[https://empty-methodical-asphalt.solana-mainnet.quiknode.pro/121047ee49945da6b0adba7cd07826e4802812c3/]
+ "wallets": {
+    "burner":         { "pubkey": "", "keyfile": "keys/burner.json" },
+    "collector":      { "pubkey": "", "keyfile": "keys/collector.json" },
+    "funder_active":  { "pubkey": "", "keyfile": "keys/funder_active.json" },
+    "funder_next":    { "pubkey": "", "keyfile": "keys/funder_next.json" },
+    "funder_standby": { "pubkey": "", "keyfile": "keys/funder_standby.json" },
+    "proxy3":         { "pubkey": "", "keyfile": "keys/proxy3.json" },
+    "proxy4":         { "pubkey": "", "keyfile": "keys/proxy4.json" }
+	"proxy5":         { "pubkey": "", "keyfile": "keys/proxy5.json" },
+    "proxy6":         { "pubkey": "", "keyfile": "keys/proxy6.json" }
 
   },
   "last_rotation": null,
@@ -683,8 +685,9 @@ class AppCfg(BaseModel):
     PROXY4_KEY: str = Field(default_factory=lambda: os.getenv('PROXY4_KEY', 'proxy4.json'))
     PROXY5_KEY: str = Field(default_factory=lambda: os.getenv('PROXY5_KEY', 'proxy5.json'))
     PROXY6_KEY: str = Field(default_factory=lambda: os.getenv('PROXY6_KEY', 'proxy6.json'))
-    HOLD_HOT_KEY: str = Field(default_factory=lambda: os.getenv('VAULT_A_KEY', 'vault_a.json'))
-    VHOLD_COLD_KEY: str = Field(default_factory=lambda: os.getenv('VAULT_B_KEY', 'vault_b.json'))
+   	HOLD_HOT_KEY: str  = Field(default_factory=lambda: os.getenv('HOLD_HOT_KEY',  'hold_hot.json'))
+	HOLD_COLD_KEY: str = Field(default_factory=lambda: os.getenv('HOLD_COLD_KEY', 'hold_cold.json'))
+
 
     dex: DexCfg = Field(default_factory=DexCfg)
     proxy: ProxyCfg = Field(default_factory=ProxyCfg)
@@ -833,16 +836,6 @@ import time, random
 
 def jitter(min_s:int, max_s:int):
     time.sleep(random.randint(min_s, max_s))
-```
-
-```python
-# src/core/keystore.py
-from pathlib import Path
-class KeyStore:
-    base = Path('keys')
-    @staticmethod
-    def path(name:str) -> Path:
-        return KeyStore.base / name
 ```
 
 ```python
@@ -1120,18 +1113,15 @@ class SolanaClient:
 
     @staticmethod
     def price_for_target_priority_sol(target_priority_sol: float, estimated_cu: int) -> int:
-	    """
-	    Convert a target priority fee in SOL to micro-lamports per compute unit.
-	    Example: target_priority_sol = 0.01, estimated_cu = 300_000
-	    """
-	    if target_priority_sol <= 0 or estimated_cu <= 0:
-	        return 0  # no tip
-	
-	    LAMPORTS_PER_SOL = 1_000_000_000
-	    lamports = int(target_priority_sol * LAMPORTS_PER_SOL)
-	
-	    # micro-lamports per CU = (lamports * 1_000_000) / estimated_cu
-	    return max(int(lamports * 1_000_000 // estimated_cu), 1)
+        """
+        Convert a target priority fee in SOL to micro‑lamports per compute unit.
+        Example: target_priority_sol = 0.01, estimated_cu = 300_000
+        """
+        if target_priority_sol <= 0 or estimated_cu <= 0:
+            return 0  # no tip
+        lamports = int(target_priority_sol * LAMPORTS_PER_SOL)
+        # micro‑lamports per CU = (lamports * 1_000_000) / estimated_cu
+        return max(int(lamports * 1_000_000 // estimated_cu), 1)
 
 
 
@@ -1208,33 +1198,31 @@ class SolanaClient:
         logger.warning(f"Burn wallet called for {key_path} (file deletion handled elsewhere).")
 
 	def send_legacy_tx_bytes(self, tx_bytes: bytes, signer_keyfile: str, skip_preflight: bool = True) -> str:
-	        """
-	        Sign a legacy Transaction (bytes), then send+confirm.
-	        """
-	        kp = load_keypair_from_file(signer_keyfile)
-	        tx = Transaction.deserialize(tx_bytes)
-	        tx.sign(kp)
-	
-	        raw = bytes(tx.serialize())  # re-serialize with signature
-	        resp = self.client.send_raw_transaction(raw, opts=TxOpts(skip_preflight=skip_preflight, max_retries=3))
-	        if not self._resp_ok(resp):
-	            raise RuntimeError(f"send_raw_transaction error: {resp}")
-	        try:
-	            sig = str(resp.value)
-	        except Exception:
-	            sig = str(resp.get("result"))
-	
-	        try:
-	            conf = self.client.confirm_transaction(Signature.from_string(sig))
-	            if not self._resp_ok(conf):
-	                logger.warning(f"[jup] confirm error: {conf}")
-	        except Exception as e:
-	            logger.warning(f"[jup] confirm exception: {e}")
-	        return sig
-	
-	    @staticmethod
-	    def lamports_from_sol(amount_sol: float) -> int:
-	        return int(amount_sol * 1_000_000_000)
+         """
+        Sign a legacy Transaction (bytes), then send+confirm.
+        """
+        kp = load_keypair_from_file(signer_keyfile)
+        tx = Transaction.deserialize(tx_bytes)
+        tx.sign(kp)
+        raw = bytes(tx.serialize())  # re‑serialize with signature
+        resp = self.client.send_raw_transaction(raw, opts=TxOpts(skip_preflight=skip_preflight, max_retries=3))
+        if not self._resp_ok(resp):
+            raise RuntimeError(f"send_raw_transaction error: {resp}")
+        try:
+            sig = str(resp.value)
+        except Exception:
+            sig = str(resp.get("result"))
+        try:
+            conf = self.client.confirm_transaction(Signature.from_string(sig))
+            if not self._resp_ok(conf):
+                logger.warning(f"[jup] confirm error: {conf}")
+        except Exception as e:
+            logger.warning(f"[jup] confirm exception: {e}")
+        return sig
+
+    @staticmethod
+    def lamports_from_sol(amount_sol: float) -> int:
+        return int(amount_sol * LAMPORTS_PER_SOL)
 
 ```
 
@@ -1369,7 +1357,7 @@ class DexClient:
             f"Swapping {amount_sol} SOL to BTC:{alloc.btc} ETH:{alloc.eth} XRP:{alloc.xrp} "
             f"(slip={slippage_bps}bps, priority_micro={priority_micro_lamports})"
         )
-        return {"btc": amount_sol*alloc.btc, "eth": amount_sol*alloc.eth, "xrp": amount_sol*xrp}
+        return {"btc": amount_sol*alloc.btc, "eth": amount_sol*alloc.eth, "xrp": amount_sol*alloc.xrp}
 
 
 
@@ -1434,17 +1422,18 @@ class Swapper:
     def __init__(self, dex: DexClient):
         self.dex = dex
 
-    def swap_chunks(self, wallet: str, total_sol: float):
+    def swap_chunks(self, wallet: str, total_sol: float) -> None:
         """
-        Split a total SOL amount into chunks and swap to the target allocation.
-        Uses DEX-swap slippage and (by default) NO priority tip for sweeps.
+        Swap a total SOL amount into BTC/ETH/XRP according to CFG.dex.splits, in chunks.
+        NOTE: After this completes, you hold SPL tokens (not SOL). If you want to
+        route tokens via proxies, you must implement SPL token transfers separately.
         """
         remaining = float(total_sol)
         alloc = SwapAlloc(CFG.dex.splits.btc, CFG.dex.splits.eth, CFG.dex.splits.xrp)
 
-        # Compute priority price for *sweeps* (likely 0.0 SOL → micro price = 0)
+        # Priority fee for sweeps (often 0.0 SOL -> micro price 0)
         price_micro = SolanaClient.price_for_target_priority_sol(
-            target_priority_sol=CFG.priority.dex_swap_priority_sol,   # 0.0 -> no tip
+            target_priority_sol=CFG.priority.dex_swap_priority_sol,
             estimated_cu=CFG.priority.estimated_swap_cu,
         )
         slip_bps = CFG.slippage.dex_swap_slippage_bps
@@ -1452,10 +1441,9 @@ class Swapper:
         while remaining > 0:
             chunk = min(CFG.dex.chunk_size_sol, remaining)
 
-            # Hand both slippage and priority into the DexClient so it can
-            # add min_out & compute budget ixs correctly per transaction.
+            # Perform the swap (SOL -> BTC/ETH/XRP)
             self.dex.swap_sol_to_alloc(
-                wallet=wallet,
+                from_wallet=wallet,               # <-- correct kwarg
                 amount_sol=chunk,
                 alloc=alloc,
                 slippage_bps=slip_bps,
@@ -1463,12 +1451,8 @@ class Swapper:
             )
 
             remaining -= chunk
-            logger.info(f"[swapper] chunk={chunk} SOL done; remaining={remaining} SOL")
+            logger.info(f"[swapper] chunk={chunk} SOL swapped; remaining={remaining} SOL")
 
-			# After swap into BTC/ETH/XRP
-			self.proxy_transfer(wallet_from="collector", wallet_to="proxy3")
-			self.proxy_transfer(wallet_from="proxy3", wallet_to="proxy4")
-			self.proxy_transfer(wallet_from="proxy4", wallet_to="vault_wallet")
 
 ```
 
@@ -1572,7 +1556,7 @@ class CollectorFlow:
 	    transfer_via_proxies(
 	        hops=[CFG.PROXY3_KEY, CFG.PROXY4_KEY],
 	        src_key=CFG.COLLECTOR_KEY,
-	        dst_key=CFG.VAULT_A_KEY,
+	        dst_key=CFG.HOLD_HOT_KEY,
 	        amount_sol=sol_amount_for_a,
 	        delay_s_min=CFG.proxy.delay_s_min,
 	        delay_s_max=CFG.proxy.delay_s_max,
@@ -1583,7 +1567,7 @@ class CollectorFlow:
 	    transfer_via_proxies(
 	        hops=[CFG.PROXY5_KEY, CFG.PROXY6_KEY],
 	        src_key=CFG.COLLECTOR_KEY,
-	        dst_key=CFG.VAULT_B_KEY,
+	        dst_key=CFG.HOLD_COLD_KEY,
 	        amount_sol=sol_amount_for_b,
 	        delay_s_min=CFG.proxy.delay_s_min,
 	        delay_s_max=CFG.proxy.delay_s_max,
@@ -1745,55 +1729,60 @@ class DailyRotation:
         fr.ensure_active_has_5()
         logger.info("✅ Daily rotation finished.")
 
+	def _role_from_filename(fname: str) -> str:
+	    n = fname.lower()
+	    for k in ("proxy1", "proxy2", "proxy3", "proxy4", "proxy5", "proxy6"):
+	        if k in n:
+	            return k
+	    return "proxy"
+
 	def transfer_via_proxies(
-	    *,
-	    hops: list[str],          # list of key names from CFG, in order. e.g. [CFG.PROXY1_KEY, CFG.PROXY2_KEY]
-	    src_key: str,             # key name (from CFG) of the sender wallet
-	    dst_key: str,             # key name (from CFG) of the final receiver wallet
-	    amount_sol: float,
-	    delay_s_min: int = 0,
-	    delay_s_max: int = 0,
-	    burn_and_regen_on_use: bool = True,
-	):
-	    """
-	    Transfer amount_sol from src -> hops... -> dst with NO priority fee, burning each proxy after use.
-	    """
-	    wm = WalletManager()
-	    sol = SolanaClient()
-	
-	    path = [src_key] + hops + [dst_key]
-	    resolved = [str(KeyStore.path(k)) for k in path]
-	
-	    # sequential L1 transfers
-	    for i in range(len(resolved) - 1):
-	        src_kf = resolved[i]
-	        dst_kf = resolved[i + 1]
-	        # You need the destination pubkey string; WalletManager can give it from keyfile
-	        dst_pub = wm.pubkey_from_keyfile(dst_kf)
-	
-	        logger.info(f"[proxy] {src_kf} -> {dst_pub} amount={amount_sol} SOL (no priority)")
-	        sol.transfer(
-	            src_keyfile=src_kf,
-	            dst_addr=dst_pub,
-	            amount_sol=amount_sol,
-	            priority_micro_lamports=0,   # <-- NO PRIORITY FEE
-	            skip_preflight=True,
-	        )
-	
-	        # burn+regen the just-used proxy (not the initial src or final dst)
-	        if burn_and_regen_on_use and i > 0 and i < len(resolved) - 1:
-	            # i points to the proxy we just used as the *destination* of the previous hop.
-	            # Here we burn the wallet at index i (just-used proxy) and recreate it.
-	            # Figure out its CFG key name to call replace_wallet with the correct logical role.
-	            used_cfg_key = hops[i - 1]  # map index back into hops list
-	            logical_name = _logical_role_from_cfg_key(used_cfg_key)  # e.g. "proxy1"
-	            logger.info(f"[proxy] burn+regen {logical_name}")
-	            wm.replace_wallet(logical_name, used_cfg_key)
-	
-	        # optional jitter
-	        if delay_s_min or delay_s_max:
-	            import random
-	            sleep(random.uniform(delay_s_min, delay_s_max))
+    *,
+    hops: list[str],          # e.g. [CFG.PROXY3_KEY, CFG.PROXY4_KEY]
+    src_key: str,             # e.g. CFG.COLLECTOR_KEY
+    dst_key: str,             # e.g. CFG.HOLD_HOT_KEY
+    amount_sol: float,
+    delay_s_min: int = 0,
+    delay_s_max: int = 0,
+    burn_and_regen_on_use: bool = True,
+) -> None:
+    """
+    Move SOL from src -> hops... -> dst (L1 SOL transfers only).
+    NOTE: This does NOT move SPL tokens. Post-DEX token routing needs SPL transfers.
+    """
+    sol = SolanaClient()
+    wm  = WalletManager()
+
+    # Resolve concrete keyfile paths
+    seq = [src_key] + hops + [dst_key]
+    kfs = [str(KeyStore.path(k)) for k in seq]
+
+    # sequential transfers along the path
+    for i in range(len(kfs) - 1):
+        src_kf = kfs[i]
+        dst_kf = kfs[i + 1]
+        dst_pub = wm._State__class__ if False else None  # placeholder to show we don't introspect; use:
+        dst_pub = wm.state.get_pubkey(_role_from_filename(dst_kf)) or wm.create_wallet(_role_from_filename(dst_kf), dst_kf.split("/")[-1]).pubkey  # ensure pubkey exists
+
+        logger.info(f"[proxy] hop {i+1}/{len(kfs)-1}: {src_kf} -> {dst_pub}  amount={amount_sol} SOL")
+        sol.transfer(
+            src_keyfile=src_kf,
+            dst_addr=dst_pub,
+            amount_sol=amount_sol,
+            priority_micro_lamports=0,
+            skip_preflight=True,
+        )
+
+        # burn+regen intermediate proxy after it was *destination* of previous hop (i >= 0 and i < last-1)
+        if burn_and_regen_on_use and 0 < i < len(kfs) - 1:
+            used_cfg_fname = seq[i]  # the cfg key we just sent to
+            role = _role_from_filename(used_cfg_fname)
+            logger.info(f"[proxy] burn+regen {role}")
+            wm.replace_wallet(role, used_cfg_fname)
+
+        if delay_s_min or delay_s_max:
+            import random
+            sleep(random.uniform(delay_s_min, delay_s_max))
 	
 	
 	def _logical_role_from_cfg_key(cfg_key: str) -> str:
